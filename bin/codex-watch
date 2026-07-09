@@ -14,7 +14,8 @@ const colors = {
   cyan: "\x1b[36m",
   green: "\x1b[32m",
   red: "\x1b[31m",
-  yellow: "\x1b[33m"
+  yellow: "\x1b[33m",
+  assistantBg: "\x1b[48;5;236m"
 };
 
 function color(name, value) {
@@ -22,6 +23,13 @@ function color(name, value) {
     return value;
   }
   return colors[name] + value + colors.reset;
+}
+
+function assistantText(value) {
+  if (!useColor) {
+    return value;
+  }
+  return colors.assistantBg + colors.cyan + value + "\x1b[K" + colors.reset;
 }
 
 function printUsage() {
@@ -363,7 +371,7 @@ function renderLine(line) {
   const match = line.match(/^\[[^\]]+\]\s+(.*)$/);
   if (!match) {
     if (assistantBlock) {
-      console.log(color("cyan", line));
+      console.log(assistantText(line));
     } else {
       console.log(line);
     }
