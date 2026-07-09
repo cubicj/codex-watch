@@ -409,7 +409,7 @@ function renderLine(line) {
     return;
   }
 
-  if (event === "Turn started" || event === "Turn completed" || event === "Thread ready" || event === "Final output") {
+  if (/^(Turn started|Turn completed|Thread ready|Final output)\b/.test(event)) {
     console.log(color("gray", event));
     return;
   }
