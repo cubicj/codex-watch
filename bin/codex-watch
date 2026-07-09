@@ -1,0 +1,426 @@
+#!/usr/bin/env node
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+const childProcess = require("child_process");
+
+const args = process.argv.slice(2);
+const useColor = !process.env.NO_COLOR && process.stdout.isTTY;
+const colors = {
+  reset: "\x1b[0m",
+  dim: "\x1b[2m",
+  gray: "\x1b[90m",
+  blue: "\x1b[34m",
+  cyan: "\x1b[36m",
+  green: "\x1b[32m",
+  red: "\x1b[31m",
+  yellow: "\x1b[33m"
+};
+
+function color(name, value) {
+  if (!useColor) {
+    return value;
+  }
+  return colors[name] + value + colors.reset;
+}
+
+function printUsage() {
+  console.log("Usage: codex-watch [--once] [--help]");
+  console.log("");
+  console.log("Live-tail the newest Codex companion job log for the current git repo.");
+  console.log("");
+  console.log("Options:");
+  console.log("  --once   Render the current newest job once and exit");
+  console.log("  -h, --help   Show this help");
+}
+
+if (args.includes("--help") || args.includes("-h")) {
+  printUsage();
+  process.exit(0);
+}
+
+const once = args.includes("--once");
+const repoRoot = resolveRepoRoot();
+const slug = makeSlug(repoRoot);
+const stateRoot = process.env.CLAUDE_PLUGIN_DATA
+  ? path.join(process.env.CLAUDE_PLUGIN_DATA, "state")
+  : path.join(os.homedir(), ".claude/plugins/data/codex-openai-codex/state");
+const stateDirPattern = new RegExp("^" + escapeRegExp(slug) + "-[0-9a-f]{6,}$");
+
+let currentJob = null;
+let currentKey = "";
+let logOffset = 0;
+let pendingText = "";
+let assistantBlock = false;
+let tailTimer = null;
+let scanTimer = null;
+let waitingPrinted = false;
+let completionBannerPrinted = false;
+
+process.on("SIGINT", () => {
+  clearTimers();
+  process.stdout.write("\n");
+  process.exit(0);
+});
+
+if (once) {
+  const job = findNewestJob();
+  if (!job) {
+    console.log("No Codex job found for " + slug + ".");
+    process.exit(0);
+  }
+  printHeader(job);
+  renderWholeLog(job);
+  process.exit(0);
+}
+
+startFollow();
+
+function resolveRepoRoot() {
+  try {
+    const output = childProcess.execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+    const trimmed = output.trim();
+    return trimmed || process.cwd();
+  } catch (_error) {
+    return process.cwd();
+  }
+}
+
+function makeSlug(root) {
+  return path.basename(root).replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function safeReadDir(dir, options) {
+  try {
+    return fs.readdirSync(dir, options);
+  } catch (_error) {
+    return [];
+  }
+}
+
+function safeStat(file) {
+  try {
+    return fs.statSync(file);
+  } catch (_error) {
+    return null;
+  }
+}
+
+function readJson(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (_error) {
+    return {};
+  }
+}
+
+function findNewestJob() {
+  const stateEntries = safeReadDir(stateRoot, { withFileTypes: true });
+  const candidates = [];
+
+  for (const entry of stateEntries) {
+    if (!entry.isDirectory() || !stateDirPattern.test(entry.name)) {
+      continue;
+    }
+
+    const jobsDir = path.join(stateRoot, entry.name, "jobs");
+    const jobEntries = safeReadDir(jobsDir, { withFileTypes: true });
+
+    for (const jobEntry of jobEntries) {
+      if (!jobEntry.isFile() || !jobEntry.name.endsWith(".json")) {
+        continue;
+      }
+
+      const id = path.basename(jobEntry.name, ".json");
+      const jsonPath = path.join(jobsDir, jobEntry.name);
+      const logPath = path.join(jobsDir, id + ".log");
+      const meta = readJson(jsonPath);
+      const stat = safeStat(jsonPath);
+      const fallbackCreatedAt = stat ? stat.mtime.toISOString() : "";
+      const createdAt = typeof meta.createdAt === "string" && meta.createdAt ? meta.createdAt : fallbackCreatedAt;
+
+      candidates.push({
+        id,
+        jsonPath,
+        logPath,
+        createdAt,
+        displayedCreatedAt: typeof meta.createdAt === "string" ? meta.createdAt : createdAt,
+        status: typeof meta.status === "string" ? meta.status : "unknown",
+        phase: typeof meta.phase === "string" ? meta.phase : "unknown",
+        summary: typeof meta.summary === "string" ? meta.summary : ""
+      });
+    }
+  }
+
+  candidates.sort((a, b) => {
+    if (a.createdAt === b.createdAt) {
+      return a.id.localeCompare(b.id);
+    }
+    return a.createdAt < b.createdAt ? 1 : -1;
+  });
+
+  return candidates[0] || null;
+}
+
+function startFollow() {
+  scanTimer = setInterval(scanForNewJob, 1000);
+  scanForNewJob();
+}
+
+function scanForNewJob() {
+  const newest = findNewestJob();
+  if (!newest) {
+    if (!waitingPrinted) {
+      console.log("waiting for a Codex job in " + slug + "…");
+      waitingPrinted = true;
+    }
+    return;
+  }
+
+  if (!currentJob) {
+    switchToJob(newest, false);
+    return;
+  }
+
+  if (newest.createdAt > currentJob.createdAt) {
+    console.log(color("dim", "──────── switched to " + newest.id + " ────────"));
+    switchToJob(newest, true);
+  }
+}
+
+function switchToJob(job) {
+  currentJob = job;
+  currentKey = job.jsonPath;
+  logOffset = 0;
+  pendingText = "";
+  assistantBlock = false;
+  waitingPrinted = false;
+  completionBannerPrinted = false;
+  if (tailTimer) {
+    clearInterval(tailTimer);
+  }
+  printHeader(job);
+  readAvailableLog();
+  tailTimer = setInterval(readAvailableLog, 400);
+}
+
+function clearTimers() {
+  if (scanTimer) {
+    clearInterval(scanTimer);
+  }
+  if (tailTimer) {
+    clearInterval(tailTimer);
+  }
+}
+
+function printHeader(job) {
+  const elapsed = formatElapsed(job.displayedCreatedAt);
+  const line = "job " + job.id + " | status " + job.status + " | phase " + job.phase + " | elapsed " + elapsed;
+  console.log(color("dim", line));
+}
+
+function formatElapsed(createdAt, updatedAt) {
+  const started = Date.parse(createdAt);
+  if (!Number.isFinite(started)) {
+    return "unknown";
+  }
+  const ended = updatedAt ? Date.parse(updatedAt) : Date.now();
+  const elapsedUntil = Number.isFinite(ended) ? ended : Date.now();
+  const seconds = Math.max(0, Math.floor((elapsedUntil - started) / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = seconds % 60;
+  if (hours > 0) {
+    return hours + "h " + minutes + "m " + remainingSeconds + "s";
+  }
+  if (minutes > 0) {
+    return minutes + "m " + remainingSeconds + "s";
+  }
+  return remainingSeconds + "s";
+}
+
+function renderWholeLog(job) {
+  const text = readFileText(job.logPath);
+  renderText(text);
+}
+
+function readAvailableLog() {
+  if (!currentJob || currentKey !== currentJob.jsonPath) {
+    return;
+  }
+
+  if (!checkJobCompletion()) {
+    return;
+  }
+
+  const stat = safeStat(currentJob.logPath);
+  if (!stat || !stat.isFile()) {
+    return;
+  }
+
+  if (stat.size < logOffset) {
+    logOffset = 0;
+    pendingText = "";
+    assistantBlock = false;
+  }
+
+  if (stat.size === logOffset) {
+    return;
+  }
+
+  const chunk = readFileChunk(currentJob.logPath, logOffset, stat.size - logOffset);
+  logOffset = stat.size;
+  renderText(chunk, true);
+}
+
+function checkJobCompletion() {
+  let meta = null;
+  try {
+    meta = JSON.parse(fs.readFileSync(currentJob.jsonPath, "utf8"));
+  } catch (_error) {
+    return false;
+  }
+
+  const status = typeof meta.status === "string" ? meta.status : "unknown";
+  if (completionBannerPrinted || !isTerminalStatus(status)) {
+    return true;
+  }
+
+  const createdAt = typeof meta.createdAt === "string" && meta.createdAt ? meta.createdAt : currentJob.displayedCreatedAt;
+  const updatedAt = typeof meta.updatedAt === "string" && meta.updatedAt ? meta.updatedAt : "";
+  const elapsed = formatElapsed(createdAt, updatedAt);
+  if (status === "completed") {
+    console.log(color("green", "✓ completed · " + elapsed));
+  } else {
+    console.log(color("red", "✗ " + status + " · " + elapsed));
+  }
+  completionBannerPrinted = true;
+  return true;
+}
+
+function isTerminalStatus(status) {
+  return status !== "running" && status !== "queued" && status !== "pending";
+}
+
+function readFileText(file) {
+  try {
+    return fs.readFileSync(file, "utf8");
+  } catch (_error) {
+    return "";
+  }
+}
+
+function readFileChunk(file, start, length) {
+  let fd = null;
+  try {
+    fd = fs.openSync(file, "r");
+    const buffer = Buffer.alloc(length);
+    const bytesRead = fs.readSync(fd, buffer, 0, length, start);
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } catch (_error) {
+    return "";
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch (_error) {
+        return "";
+      }
+    }
+  }
+}
+
+function renderText(text, keepPartial) {
+  if (!text) {
+    return;
+  }
+
+  const combined = pendingText + text;
+  const endsWithNewline = /\r?\n$/.test(combined);
+  const lines = combined.split(/\r?\n/);
+  pendingText = "";
+
+  if (!endsWithNewline && keepPartial) {
+    pendingText = lines.pop() || "";
+  } else if (endsWithNewline) {
+    lines.pop();
+  }
+
+  for (const line of lines) {
+    renderLine(line);
+  }
+}
+
+function renderLine(line) {
+  const match = line.match(/^\[[^\]]+\]\s+(.*)$/);
+  if (!match) {
+    if (assistantBlock) {
+      console.log(color("cyan", line));
+    } else {
+      console.log(line);
+    }
+    return;
+  }
+
+  const event = match[1];
+
+  if (event === "Assistant message") {
+    assistantBlock = true;
+    return;
+  }
+
+  assistantBlock = false;
+
+  if (event.startsWith("Assistant message captured:")) {
+    return;
+  }
+
+  if (event.startsWith("Running command: ")) {
+    console.log(color("dim", color("blue", "Running command: " + truncate(event.slice("Running command: ".length)))));
+    return;
+  }
+
+  const completed = event.match(/^Command completed: (.*) \(exit ([0-9]+)\)$/);
+  if (completed) {
+    const message = "Command completed: " + truncate(completed[1]) + " (exit " + completed[2] + ")";
+    if (completed[2] === "0") {
+      console.log(color("green", "✓ " + message));
+    } else {
+      console.log(color("red", "✗ " + message));
+    }
+    return;
+  }
+
+  if (event.startsWith("Command failed")) {
+    console.log(color("red", "✗ " + event));
+    return;
+  }
+
+  if (event.startsWith("File changes") || /^Applying [0-9]+ file change\(s\)\.$/.test(event) || event === "File changes completed.") {
+    console.log(color("yellow", event));
+    return;
+  }
+
+  if (event === "Turn started" || event === "Turn completed" || event === "Thread ready" || event === "Final output") {
+    console.log(color("gray", event));
+    return;
+  }
+
+  console.log(event);
+}
+
+function truncate(value) {
+  const maxLength = 140;
+  if (value.length <= maxLength) {
+    return value;
+  }
+  return value.slice(0, maxLength - 1) + "…";
+}

@@ -1,0 +1,23 @@
+{
+  "name": "codex-watch",
+  "version": "0.1.0",
+  "description": "Live-tail the newest Codex plugin background job log for the current git repo.",
+  "license": "MIT",
+  "bin": {
+    "codex-watch": "bin/codex-watch"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin"
+  ],
+  "keywords": [
+    "codex",
+    "claude-code",
+    "cli"
+  ]
+}
