@@ -1,5 +1,5 @@
 {
-  "name": "codex-watch",
+  "name": "@cubicj/codex-watch",
   "version": "0.1.0",
   "description": "Live-tail the newest Codex plugin background job log for the current git repo.",
   "license": "MIT",

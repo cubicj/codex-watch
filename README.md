@@ -25,7 +25,7 @@ Live-tail the newest Codex plugin background job log for the current git repo.
 Global install:
 
 ```sh
-npm install -g codex-watch
+npm install -g @cubicj/codex-watch
 codex-watch
 ```
 
