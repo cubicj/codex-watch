@@ -421,6 +421,35 @@ test("follow mode waits for a qualifying rollout turn context", async () => {
   }
 });
 
+test("follow mode switches to a greater job id with the same createdAt", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  let createTimer = null;
+
+  try {
+    createFakeJob(tempDir, {
+      id: "switch-tie-a-job",
+      lines: [event("Assistant message"), "First job output."]
+    });
+
+    const stdoutPromise = runFollowMode([], tempDir, 1800);
+    createTimer = setTimeout(() => {
+      createFakeJob(tempDir, {
+        id: "switch-tie-b-job",
+        lines: [event("Assistant message"), "Second job output."]
+      });
+    }, 600);
+
+    const stdout = await stdoutPromise;
+
+    assert.match(stdout, /job switch-tie-a-job \| status running/);
+    assert.match(stdout, /switched to switch-tie-b-job/);
+    assert.match(stdout, /Second job output\./);
+  } finally {
+    clearTimeout(createTimer);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("assistant message body lines appear verbatim", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
   const firstLine = "The first assistant line.";

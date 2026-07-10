@@ -217,7 +217,10 @@ function scanForNewJob() {
     return;
   }
 
-  if (newest.createdAt > currentJob.createdAt) {
+  if (
+    newest.createdAt > currentJob.createdAt ||
+    (newest.createdAt === currentJob.createdAt && newest.id.localeCompare(currentJob.id) > 0)
+  ) {
     console.log(color("dim", "──────── switched to " + newest.id + " ────────"));
     switchToJob(newest);
   }
