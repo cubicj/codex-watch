@@ -161,6 +161,39 @@ test("assistant message body lines appear verbatim", () => {
   }
 });
 
+test("bracketed assistant body lines are not parsed as event markers", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const firstBracketedLine = "[x] first item";
+  const commandLikeBodyLine = "[note] Command completed: x (exit 0)";
+  const trailingLine = "Trailing assistant body line.";
+  const completedLine = "✓ Command completed: x (exit 0)";
+
+  try {
+    createFakeJob(tempDir, {
+      id: "bracketed-assistant-body-job",
+      lines: [
+        event("Assistant message"),
+        firstBracketedLine,
+        commandLikeBodyLine,
+        trailingLine,
+        event("Command completed: x (exit 0)")
+      ]
+    });
+
+    const result = runCodexWatch(["--once"], tempDir);
+    const outputLines = result.stdout.split(/\r?\n/);
+
+    assert.strictEqual(result.status, 0);
+    assert.ok(outputLines.includes(firstBracketedLine));
+    assert.ok(outputLines.includes(commandLikeBodyLine));
+    assert.ok(outputLines.includes(trailingLine));
+    assert.ok(!outputLines.includes("✓ " + commandLikeBodyLine));
+    assert.strictEqual(outputLines.filter((line) => line === completedLine).length, 1);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("assistant message captured preamble is suppressed", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
 
