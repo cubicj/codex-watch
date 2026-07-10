@@ -74,6 +74,8 @@ let scanTimer = null;
 let waitingPrinted = false;
 let completionBannerPrinted = false;
 let sessionInfoPrinted = false;
+let sessionRolloutPath = "";
+let lastRolloutSearchAt = null;
 
 process.on("SIGINT", () => {
   clearTimers();
@@ -172,6 +174,7 @@ function findNewestJob() {
         logPath,
         createdAt,
         displayedCreatedAt: typeof meta.createdAt === "string" && meta.createdAt ? meta.createdAt : createdAt,
+        startedAt: typeof meta.startedAt === "string" ? meta.startedAt : "",
         status: typeof meta.status === "string" ? meta.status : "unknown",
         phase: typeof meta.phase === "string" ? meta.phase : "unknown",
         summary: typeof meta.summary === "string" ? meta.summary : "",
@@ -226,6 +229,8 @@ function switchToJob(job) {
   waitingPrinted = false;
   completionBannerPrinted = false;
   sessionInfoPrinted = false;
+  sessionRolloutPath = "";
+  lastRolloutSearchAt = null;
   if (tailTimer) {
     clearInterval(tailTimer);
   }
@@ -255,18 +260,34 @@ function printSessionInfo(job) {
     return;
   }
 
-  const rolloutPath = findRolloutFile(job.threadId);
-  if (!rolloutPath) {
-    return;
+  if (!sessionRolloutPath) {
+    const now = Date.now();
+    if (lastRolloutSearchAt !== null && now - lastRolloutSearchAt < 5000) {
+      return;
+    }
+    lastRolloutSearchAt = now;
+    sessionRolloutPath = findRolloutFile(job.threadId);
+    if (!sessionRolloutPath) {
+      return;
+    }
   }
 
-  const text = readFileText(rolloutPath);
+  const text = readFileText(sessionRolloutPath);
+  const startedAt = typeof job.startedAt === "string" && job.startedAt
+    ? job.startedAt
+    : typeof job.createdAt === "string"
+      ? job.createdAt
+      : "";
   let turnContext = null;
 
   for (const line of text.split(/\r?\n/)) {
     try {
       const entry = JSON.parse(line);
-      if (entry && entry.type === "turn_context") {
+      if (
+        entry &&
+        entry.type === "turn_context" &&
+        (!startedAt || (typeof entry.timestamp === "string" && entry.timestamp >= startedAt))
+      ) {
         turnContext = entry;
       }
     } catch (_error) {}
@@ -394,6 +415,7 @@ function checkJobCompletion() {
   const status = typeof meta.status === "string" ? meta.status : "unknown";
   currentJob.threadId = typeof meta.threadId === "string" ? meta.threadId : "";
   currentJob.write = typeof meta.write === "boolean" ? meta.write : false;
+  currentJob.startedAt = typeof meta.startedAt === "string" ? meta.startedAt : "";
   printSessionInfo(currentJob);
   if (!isTerminalStatus(status)) {
     return true;

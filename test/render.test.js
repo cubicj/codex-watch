@@ -51,14 +51,25 @@ function createFakeRollout(codexHome, threadId, turnContexts) {
   const sessionsDir = path.join(codexHome, "sessions", "2026", "07", "09");
   const entries = [
     { timestamp, type: "session_meta", payload: { id: threadId } },
-    ...turnContexts.map((payload) => ({ timestamp, type: "turn_context", payload }))
+    ...turnContexts.map((turnContext) => {
+      if (turnContext && typeof turnContext === "object" && Object.hasOwn(turnContext, "payload")) {
+        return {
+          timestamp: typeof turnContext.timestamp === "string" ? turnContext.timestamp : timestamp,
+          type: "turn_context",
+          payload: turnContext.payload
+        };
+      }
+      return { timestamp, type: "turn_context", payload: turnContext };
+    })
   ];
+  const rolloutPath = path.join(sessionsDir, "rollout-2026-07-09T23-23-59-" + threadId + ".jsonl");
 
   fs.mkdirSync(sessionsDir, { recursive: true });
   fs.writeFileSync(
-    path.join(sessionsDir, "rollout-2026-07-09T23-23-59-" + threadId + ".jsonl"),
+    rolloutPath,
     entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n"
   );
+  return rolloutPath;
 }
 
 function getFakeJobLogPath(dataDir, id) {
@@ -239,6 +250,67 @@ test("once uses the last rollout turn context", () => {
   }
 });
 
+test("once rejects rollout turn context older than the job start", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const codexHome = path.join(tempDir, "codex-home");
+  const threadId = "123e4567-e89b-12d3-a456-426614174007";
+
+  try {
+    createFakeJob(tempDir, {
+      id: "stale-turn-context-job",
+      startedAt: "2026-07-09T14:24:00.000Z",
+      threadId,
+      lines: [event("Starting Codex Task.")]
+    });
+    createFakeRollout(codexHome, threadId, [
+      {
+        timestamp: "2026-07-09T14:23:59.000Z",
+        payload: { model: "stale-model" }
+      }
+    ]);
+
+    const result = runCodexWatch(["--once"], tempDir, codexHome);
+
+    assert.strictEqual(result.status, 0);
+    assert.doesNotMatch(result.stdout, /^model /m);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("once uses the latest qualifying rollout turn context", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const codexHome = path.join(tempDir, "codex-home");
+  const threadId = "123e4567-e89b-12d3-a456-426614174008";
+
+  try {
+    createFakeJob(tempDir, {
+      id: "fresh-turn-context-job",
+      startedAt: "2026-07-09T14:24:00.000Z",
+      threadId,
+      lines: [event("Starting Codex Task.")]
+    });
+    createFakeRollout(codexHome, threadId, [
+      {
+        timestamp: "2026-07-09T14:23:59.000Z",
+        payload: { model: "stale-model" }
+      },
+      {
+        timestamp: "2026-07-09T14:24:01.000Z",
+        payload: { model: "fresh-model" }
+      }
+    ]);
+
+    const result = runCodexWatch(["--once"], tempDir, codexHome);
+
+    assert.strictEqual(result.status, 0);
+    assert.match(result.stdout, /^model fresh-model · read-only$/m);
+    assert.doesNotMatch(result.stdout, /^model stale-model /m);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("once renders read-only when write is absent or false", () => {
   for (const write of [undefined, false]) {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
@@ -298,6 +370,49 @@ test("follow mode prints session info once when threadId appears", async () => {
     assert.strictEqual(occurrences, 1);
   } finally {
     clearTimeout(rewriteTimer);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("follow mode waits for a qualifying rollout turn context", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const codexHome = path.join(tempDir, "codex-home");
+  const threadId = "123e4567-e89b-12d3-a456-426614174009";
+  const expected = "model fresh-model · effort high · read-only";
+  let appendTimer = null;
+
+  try {
+    createFakeJob(tempDir, {
+      id: "late-turn-context-job",
+      startedAt: "2026-07-09T14:24:00.000Z",
+      threadId,
+      lines: [event("Starting Codex Task.")]
+    });
+    const rolloutPath = createFakeRollout(codexHome, threadId, [
+      {
+        timestamp: "2026-07-09T14:23:59.000Z",
+        payload: { model: "stale-model", effort: "low" }
+      }
+    ]);
+
+    const stdoutPromise = runFollowMode([], tempDir, 1800, codexHome);
+    appendTimer = setTimeout(() => {
+      fs.appendFileSync(
+        rolloutPath,
+        JSON.stringify({
+          timestamp: "2026-07-09T14:24:01.000Z",
+          type: "turn_context",
+          payload: { model: "fresh-model", effort: "high" }
+        }) + "\n"
+      );
+    }, 600);
+
+    const stdout = await stdoutPromise;
+    const sessionInfoLines = stdout.split(/\r?\n/).filter((line) => line.startsWith("model "));
+
+    assert.deepStrictEqual(sessionInfoLines, [expected]);
+  } finally {
+    clearTimeout(appendTimer);
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
