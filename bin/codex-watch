@@ -160,7 +160,7 @@ function findNewestJob() {
         jsonPath,
         logPath,
         createdAt,
-        displayedCreatedAt: typeof meta.createdAt === "string" ? meta.createdAt : createdAt,
+        displayedCreatedAt: typeof meta.createdAt === "string" && meta.createdAt ? meta.createdAt : createdAt,
         status: typeof meta.status === "string" ? meta.status : "unknown",
         phase: typeof meta.phase === "string" ? meta.phase : "unknown",
         summary: typeof meta.summary === "string" ? meta.summary : ""
@@ -265,28 +265,22 @@ function readAvailableLog() {
     return;
   }
 
-  if (!checkJobCompletion()) {
-    return;
-  }
-
   const stat = safeStat(currentJob.logPath);
-  if (!stat || !stat.isFile()) {
-    return;
+  if (stat && stat.isFile()) {
+    if (stat.size < logOffset) {
+      logOffset = 0;
+      pendingText = "";
+      assistantBlock = false;
+    }
+
+    if (stat.size !== logOffset) {
+      const chunk = readFileChunk(currentJob.logPath, logOffset, stat.size - logOffset);
+      logOffset = stat.size;
+      renderText(chunk, true);
+    }
   }
 
-  if (stat.size < logOffset) {
-    logOffset = 0;
-    pendingText = "";
-    assistantBlock = false;
-  }
-
-  if (stat.size === logOffset) {
-    return;
-  }
-
-  const chunk = readFileChunk(currentJob.logPath, logOffset, stat.size - logOffset);
-  logOffset = stat.size;
-  renderText(chunk, true);
+  checkJobCompletion();
 }
 
 function checkJobCompletion() {
@@ -303,8 +297,10 @@ function checkJobCompletion() {
   }
 
   const createdAt = typeof meta.createdAt === "string" && meta.createdAt ? meta.createdAt : currentJob.displayedCreatedAt;
+  const startedAt = typeof meta.startedAt === "string" && meta.startedAt ? meta.startedAt : createdAt;
   const updatedAt = typeof meta.updatedAt === "string" && meta.updatedAt ? meta.updatedAt : "";
-  const elapsed = formatElapsed(createdAt, updatedAt);
+  const completedAt = typeof meta.completedAt === "string" && meta.completedAt ? meta.completedAt : updatedAt;
+  const elapsed = formatElapsed(startedAt, completedAt);
   if (status === "completed") {
     console.log(color("green", "✓ completed · " + elapsed));
   } else {

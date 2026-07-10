@@ -272,3 +272,75 @@ test("follow mode prints the header for an existing job", async () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test("completed job banner uses startedAt and completedAt", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "completed-duration-job",
+      createdAt: "2026-07-09T14:23:50.000Z",
+      startedAt: "2026-07-09T14:23:50.000Z",
+      completedAt: "2026-07-09T14:23:58.000Z",
+      status: "completed",
+      phase: "completed",
+      lines: [event("Starting Codex Task."), event("Turn completed.")]
+    });
+
+    const stdout = await runFollowMode([], tempDir, 1500);
+
+    assert.match(stdout, /^✓ completed · 8s$/m);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("completion banner follows rendered log output", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const bodyLine = "Completed job body.";
+  const bannerPrefix = "✓ completed · ";
+
+  try {
+    createFakeJob(tempDir, {
+      id: "completed-order-job",
+      createdAt: "2026-07-09T14:23:50.000Z",
+      startedAt: "2026-07-09T14:23:50.000Z",
+      completedAt: "2026-07-09T14:23:58.000Z",
+      status: "completed",
+      phase: "completed",
+      lines: [event("Assistant message"), bodyLine, event("Turn completed.")]
+    });
+
+    const stdout = await runFollowMode([], tempDir, 1500);
+    const bodyIndex = stdout.indexOf(bodyLine);
+    const bannerIndex = stdout.indexOf(bannerPrefix);
+
+    assert.notStrictEqual(bodyIndex, -1);
+    assert.notStrictEqual(bannerIndex, -1);
+    assert.ok(bannerIndex > bodyIndex);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("failed job banner uses startedAt and completedAt", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "failed-duration-job",
+      createdAt: "2026-07-09T14:23:50.000Z",
+      startedAt: "2026-07-09T14:23:50.000Z",
+      completedAt: "2026-07-09T14:23:58.000Z",
+      status: "failed",
+      phase: "failed",
+      lines: [event("Starting Codex Task."), event("Turn completed.")]
+    });
+
+    const stdout = await runFollowMode([], tempDir, 1500);
+
+    assert.match(stdout, /^✗ failed · 8s$/m);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
