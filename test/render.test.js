@@ -30,7 +30,7 @@ function createFakeJob(dataDir, options) {
     phase: options.phase || status
   };
 
-  if (status !== "running" && status !== "queued" && status !== "pending") {
+  if (status !== "running" && status !== "queued") {
     job.completedAt = options.completedAt || createdAt;
   }
 
@@ -262,6 +262,29 @@ test("running command is truncated after 139 characters", () => {
 
     assert.strictEqual(result.status, 0);
     assert.strictEqual(runningLine, "Running command: " + command.slice(0, 139) + "…");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("running command truncation keeps astral-plane characters intact", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const command = "x".repeat(138) + "😀" + "y".repeat(20);
+
+  try {
+    createFakeJob(tempDir, {
+      id: "astral-truncation-job",
+      lines: [event("Running command: " + command)]
+    });
+
+    const result = runCodexWatch(["--once"], tempDir);
+    const runningLine = result.stdout.split(/\r?\n/).find((line) => line.startsWith("Running command: "));
+
+    assert.strictEqual(result.status, 0);
+    assert.ok(runningLine);
+    assert.ok(runningLine.includes("😀"));
+    assert.doesNotMatch(runningLine, /�/);
+    assert.ok(runningLine.endsWith("…"));
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

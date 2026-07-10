@@ -64,7 +64,6 @@ const stateRoot = process.env.CLAUDE_PLUGIN_DATA
 const stateDirPattern = new RegExp("^" + escapeRegExp(slug) + "-[0-9a-f]{6,}$");
 
 let currentJob = null;
-let currentKey = "";
 let logOffset = 0;
 let logDecoder = new StringDecoder("utf8");
 let pendingText = "";
@@ -203,19 +202,18 @@ function scanForNewJob() {
   }
 
   if (!currentJob) {
-    switchToJob(newest, false);
+    switchToJob(newest);
     return;
   }
 
   if (newest.createdAt > currentJob.createdAt) {
     console.log(color("dim", "──────── switched to " + newest.id + " ────────"));
-    switchToJob(newest, true);
+    switchToJob(newest);
   }
 }
 
 function switchToJob(job) {
   currentJob = job;
-  currentKey = job.jsonPath;
   logOffset = 0;
   logDecoder = new StringDecoder("utf8");
   pendingText = "";
@@ -271,7 +269,7 @@ function renderWholeLog(job) {
 }
 
 function readAvailableLog() {
-  if (!currentJob || currentKey !== currentJob.jsonPath) {
+  if (!currentJob) {
     return;
   }
 
@@ -297,6 +295,10 @@ function readAvailableLog() {
 }
 
 function checkJobCompletion() {
+  if (completionBannerPrinted) {
+    return true;
+  }
+
   let meta = null;
   try {
     meta = JSON.parse(fs.readFileSync(currentJob.jsonPath, "utf8"));
@@ -305,7 +307,7 @@ function checkJobCompletion() {
   }
 
   const status = typeof meta.status === "string" ? meta.status : "unknown";
-  if (completionBannerPrinted || !isTerminalStatus(status)) {
+  if (!isTerminalStatus(status)) {
     return true;
   }
 
@@ -324,7 +326,7 @@ function checkJobCompletion() {
 }
 
 function isTerminalStatus(status) {
-  return status !== "running" && status !== "queued" && status !== "pending";
+  return status !== "running" && status !== "queued";
 }
 
 function readFileText(file) {
@@ -434,8 +436,9 @@ function renderLine(line) {
 
 function truncate(value) {
   const maxLength = 140;
-  if (value.length <= maxLength) {
+  const codePoints = Array.from(value);
+  if (codePoints.length <= maxLength) {
     return value;
   }
-  return value.slice(0, maxLength - 1) + "…";
+  return codePoints.slice(0, maxLength - 1).join("") + "…";
 }
