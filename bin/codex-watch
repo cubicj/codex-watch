@@ -3,6 +3,14 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const childProcess = require("child_process");
+const { StringDecoder } = require("node:string_decoder");
+
+process.stdout.on("error", (error) => {
+  if (error.code === "EPIPE") {
+    process.exit(0);
+  }
+  throw error;
+});
 
 const args = process.argv.slice(2);
 const useColor = !process.env.NO_COLOR && process.stdout.isTTY;
@@ -58,6 +66,7 @@ const stateDirPattern = new RegExp("^" + escapeRegExp(slug) + "-[0-9a-f]{6,}$");
 let currentJob = null;
 let currentKey = "";
 let logOffset = 0;
+let logDecoder = new StringDecoder("utf8");
 let pendingText = "";
 let assistantBlock = false;
 let tailTimer = null;
@@ -208,6 +217,7 @@ function switchToJob(job) {
   currentJob = job;
   currentKey = job.jsonPath;
   logOffset = 0;
+  logDecoder = new StringDecoder("utf8");
   pendingText = "";
   assistantBlock = false;
   waitingPrinted = false;
@@ -269,14 +279,17 @@ function readAvailableLog() {
   if (stat && stat.isFile()) {
     if (stat.size < logOffset) {
       logOffset = 0;
+      logDecoder = new StringDecoder("utf8");
       pendingText = "";
       assistantBlock = false;
     }
 
     if (stat.size !== logOffset) {
       const chunk = readFileChunk(currentJob.logPath, logOffset, stat.size - logOffset);
-      logOffset = stat.size;
-      renderText(chunk, true);
+      if (chunk !== null) {
+        logOffset += chunk.length;
+        renderText(logDecoder.write(chunk), true);
+      }
     }
   }
 
@@ -328,16 +341,14 @@ function readFileChunk(file, start, length) {
     fd = fs.openSync(file, "r");
     const buffer = Buffer.alloc(length);
     const bytesRead = fs.readSync(fd, buffer, 0, length, start);
-    return buffer.subarray(0, bytesRead).toString("utf8");
+    return buffer.subarray(0, bytesRead);
   } catch (_error) {
-    return "";
+    return null;
   } finally {
     if (fd !== null) {
       try {
         fs.closeSync(fd);
-      } catch (_error) {
-        return "";
-      }
+      } catch (_error) {}
     }
   }
 }

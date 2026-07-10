@@ -41,6 +41,12 @@ function createFakeJob(dataDir, options) {
   return job;
 }
 
+function getFakeJobLogPath(dataDir, id) {
+  const stateRoot = path.join(dataDir, "state");
+  const stateDir = fs.readdirSync(stateRoot)[0];
+  return path.join(stateRoot, stateDir, "jobs", id + ".log");
+}
+
 function runCodexWatch(args, dataDir) {
   const stdoutPath = path.join(dataDir, "stdout.txt");
   const stdoutFd = fs.openSync(stdoutPath, "w");
@@ -374,6 +380,97 @@ test("failed job banner uses startedAt and completedAt", async () => {
 
     assert.match(stdout, /^✗ failed · 8s$/m);
   } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("follow mode preserves UTF-8 split across chunks", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const id = "utf8-split-job";
+  const koreanLine = "한글 메시지가 온전히 출력된다.";
+  const marker = event("Assistant message") + "\n";
+  const fullLog = Buffer.from(marker + koreanLine + "\n");
+  const splitAt = Buffer.byteLength(marker) + 1;
+  let appendTimer = null;
+
+  try {
+    createFakeJob(tempDir, {
+      id,
+      status: "running",
+      phase: "executing",
+      lines: []
+    });
+
+    const logPath = getFakeJobLogPath(tempDir, id);
+    fs.writeFileSync(logPath, fullLog.subarray(0, splitAt));
+
+    const stdoutPromise = runFollowMode([], tempDir, 2000);
+    appendTimer = setTimeout(() => {
+      fs.appendFileSync(logPath, fullLog.subarray(splitAt));
+    }, 600);
+
+    const stdout = await stdoutPromise;
+    const outputLines = stdout.split(/\r?\n/);
+
+    assert.ok(outputLines.includes(koreanLine));
+    assert.doesNotMatch(stdout, /�/);
+  } finally {
+    clearTimeout(appendTimer);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("closed stdout pipe exits cleanly", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const id = "epipe-job";
+  let child = null;
+
+  try {
+    createFakeJob(tempDir, {
+      id,
+      status: "running",
+      phase: "executing",
+      lines: [event("Starting Codex Task.")]
+    });
+
+    const logPath = getFakeJobLogPath(tempDir, id);
+    child = spawn(process.execPath, [bin], {
+      env: {
+        ...process.env,
+        CLAUDE_PLUGIN_DATA: tempDir
+      },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+
+    const exit = await new Promise((resolve, reject) => {
+      const hardKillTimer = setTimeout(() => child.kill("SIGKILL"), 5000);
+
+      child.once("error", (error) => {
+        clearTimeout(hardKillTimer);
+        reject(error);
+      });
+      child.once("close", (code, signal) => {
+        clearTimeout(hardKillTimer);
+        resolve({ code, signal });
+      });
+      child.stdout.once("data", () => {
+        child.stdout.destroy();
+        fs.appendFileSync(logPath, event("Turn completed.") + "\n");
+      });
+    });
+
+    assert.strictEqual(exit.code, 0);
+    assert.doesNotMatch(stderr, /EPIPE/);
+  } finally {
+    if (child && child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+    }
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
