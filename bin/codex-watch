@@ -3,6 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const childProcess = require("child_process");
+const crypto = require("node:crypto");
 const { StringDecoder } = require("node:string_decoder");
 
 process.stdout.on("error", (error) => {
@@ -58,11 +59,11 @@ if (args.includes("--help") || args.includes("-h")) {
 const once = args.includes("--once");
 const repoRoot = resolveRepoRoot();
 const slug = makeSlug(repoRoot);
+const stateDirName = makeStateDirName(repoRoot, slug);
 const stateRoot = process.env.CLAUDE_PLUGIN_DATA
   ? path.join(process.env.CLAUDE_PLUGIN_DATA, "state")
   : path.join(os.homedir(), ".claude/plugins/data/codex-openai-codex/state");
 const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
-const stateDirPattern = new RegExp("^" + escapeRegExp(slug) + "-[0-9a-f]{6,}$");
 
 let currentJob = null;
 let logOffset = 0;
@@ -92,6 +93,9 @@ if (once) {
   printHeader(job);
   printSessionInfo(job);
   renderWholeLog(job);
+  if (isTerminalStatus(job.status)) {
+    printCompletionBanner(job, job.displayedCreatedAt);
+  }
   process.exit(0);
 }
 
@@ -115,8 +119,13 @@ function makeSlug(root) {
   return path.basename(root).replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
 }
 
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function makeStateDirName(root, rootSlug) {
+  let canonical = root;
+  try {
+    canonical = fs.realpathSync.native(root);
+  } catch (_error) {}
+  const hash = crypto.createHash("sha256").update(canonical).digest("hex").slice(0, 16);
+  return rootSlug + "-" + hash;
 }
 
 function safeReadDir(dir, options) {
@@ -144,49 +153,43 @@ function readJson(file) {
 }
 
 function findNewestJob() {
-  const stateEntries = safeReadDir(stateRoot, { withFileTypes: true });
+  const jobsDir = path.join(stateRoot, stateDirName, "jobs");
+  const jobEntries = safeReadDir(jobsDir, { withFileTypes: true });
   const candidates = [];
 
-  for (const entry of stateEntries) {
-    if (!entry.isDirectory() || !stateDirPattern.test(entry.name)) {
+  for (const jobEntry of jobEntries) {
+    if (!jobEntry.isFile() || !jobEntry.name.endsWith(".json")) {
       continue;
     }
 
-    const jobsDir = path.join(stateRoot, entry.name, "jobs");
-    const jobEntries = safeReadDir(jobsDir, { withFileTypes: true });
+    const id = path.basename(jobEntry.name, ".json");
+    const jsonPath = path.join(jobsDir, jobEntry.name);
+    const logPath = path.join(jobsDir, id + ".log");
+    const meta = readJson(jsonPath);
+    const stat = safeStat(jsonPath);
+    const fallbackCreatedAt = stat ? stat.mtime.toISOString() : "";
+    const createdAt = typeof meta.createdAt === "string" && meta.createdAt ? meta.createdAt : fallbackCreatedAt;
 
-    for (const jobEntry of jobEntries) {
-      if (!jobEntry.isFile() || !jobEntry.name.endsWith(".json")) {
-        continue;
-      }
-
-      const id = path.basename(jobEntry.name, ".json");
-      const jsonPath = path.join(jobsDir, jobEntry.name);
-      const logPath = path.join(jobsDir, id + ".log");
-      const meta = readJson(jsonPath);
-      const stat = safeStat(jsonPath);
-      const fallbackCreatedAt = stat ? stat.mtime.toISOString() : "";
-      const createdAt = typeof meta.createdAt === "string" && meta.createdAt ? meta.createdAt : fallbackCreatedAt;
-
-      candidates.push({
-        id,
-        jsonPath,
-        logPath,
-        createdAt,
-        displayedCreatedAt: typeof meta.createdAt === "string" && meta.createdAt ? meta.createdAt : createdAt,
-        startedAt: typeof meta.startedAt === "string" ? meta.startedAt : "",
-        status: typeof meta.status === "string" ? meta.status : "unknown",
-        phase: typeof meta.phase === "string" ? meta.phase : "unknown",
-        summary: typeof meta.summary === "string" ? meta.summary : "",
-        threadId: typeof meta.threadId === "string" ? meta.threadId : "",
-        write: typeof meta.write === "boolean" ? meta.write : false
-      });
-    }
+    candidates.push({
+      id,
+      jsonPath,
+      logPath,
+      createdAt,
+      displayedCreatedAt: typeof meta.createdAt === "string" && meta.createdAt ? meta.createdAt : createdAt,
+      startedAt: typeof meta.startedAt === "string" ? meta.startedAt : "",
+      updatedAt: typeof meta.updatedAt === "string" ? meta.updatedAt : "",
+      completedAt: typeof meta.completedAt === "string" ? meta.completedAt : "",
+      status: typeof meta.status === "string" ? meta.status : "unknown",
+      phase: typeof meta.phase === "string" ? meta.phase : "unknown",
+      summary: typeof meta.summary === "string" ? meta.summary : "",
+      threadId: typeof meta.threadId === "string" ? meta.threadId : "",
+      write: typeof meta.write === "boolean" ? meta.write : false
+    });
   }
 
   candidates.sort((a, b) => {
     if (a.createdAt === b.createdAt) {
-      return a.id.localeCompare(b.id);
+      return b.id.localeCompare(a.id);
     }
     return a.createdAt < b.createdAt ? 1 : -1;
   });
@@ -402,14 +405,14 @@ function readAvailableLog() {
 
 function checkJobCompletion() {
   if (completionBannerPrinted) {
-    return true;
+    return;
   }
 
   let meta = null;
   try {
     meta = JSON.parse(fs.readFileSync(currentJob.jsonPath, "utf8"));
   } catch (_error) {
-    return false;
+    return;
   }
 
   const status = typeof meta.status === "string" ? meta.status : "unknown";
@@ -418,21 +421,25 @@ function checkJobCompletion() {
   currentJob.startedAt = typeof meta.startedAt === "string" ? meta.startedAt : "";
   printSessionInfo(currentJob);
   if (!isTerminalStatus(status)) {
-    return true;
+    return;
   }
 
-  const createdAt = typeof meta.createdAt === "string" && meta.createdAt ? meta.createdAt : currentJob.displayedCreatedAt;
-  const startedAt = typeof meta.startedAt === "string" && meta.startedAt ? meta.startedAt : createdAt;
-  const updatedAt = typeof meta.updatedAt === "string" && meta.updatedAt ? meta.updatedAt : "";
-  const completedAt = typeof meta.completedAt === "string" && meta.completedAt ? meta.completedAt : updatedAt;
+  printCompletionBanner(meta, currentJob.displayedCreatedAt);
+  completionBannerPrinted = true;
+}
+
+function printCompletionBanner(job, fallbackCreatedAt) {
+  const status = typeof job.status === "string" ? job.status : "unknown";
+  const createdAt = typeof job.createdAt === "string" && job.createdAt ? job.createdAt : fallbackCreatedAt;
+  const startedAt = typeof job.startedAt === "string" && job.startedAt ? job.startedAt : createdAt;
+  const updatedAt = typeof job.updatedAt === "string" && job.updatedAt ? job.updatedAt : "";
+  const completedAt = typeof job.completedAt === "string" && job.completedAt ? job.completedAt : updatedAt;
   const elapsed = formatElapsed(startedAt, completedAt);
   if (status === "completed") {
     console.log(color("green", "✓ completed · " + elapsed));
   } else {
     console.log(color("red", "✗ " + status + " · " + elapsed));
   }
-  completionBannerPrinted = true;
-  return true;
 }
 
 function isTerminalStatus(status) {

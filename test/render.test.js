@@ -1,5 +1,6 @@
 const assert = require("node:assert");
 const { spawn, spawnSync } = require("node:child_process");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -8,14 +9,19 @@ const test = require("node:test");
 const repoRoot = path.join(__dirname, "..");
 const bin = path.join(repoRoot, "bin", "codex-watch");
 const timestamp = "2026-07-09T14:23:58.780Z";
+const slug = path.basename(repoRoot).replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
+let canonicalRepoRoot = repoRoot;
+try {
+  canonicalRepoRoot = fs.realpathSync.native(repoRoot);
+} catch (_error) {}
+const stateDirName = slug + "-" + crypto.createHash("sha256").update(canonicalRepoRoot).digest("hex").slice(0, 16);
 
 function event(value) {
   return "[" + timestamp + "] " + value;
 }
 
 function createFakeJob(dataDir, options) {
-  const slug = path.basename(repoRoot).replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
-  const jobsDir = path.join(dataDir, "state", slug + "-0123456789abcdef", "jobs");
+  const jobsDir = path.join(dataDir, "state", options.stateDirName || stateDirName, "jobs");
   const status = options.status || "running";
   const createdAt = options.createdAt || timestamp;
   const job = {
@@ -73,9 +79,7 @@ function createFakeRollout(codexHome, threadId, turnContexts) {
 }
 
 function getFakeJobLogPath(dataDir, id) {
-  const stateRoot = path.join(dataDir, "state");
-  const stateDir = fs.readdirSync(stateRoot)[0];
-  return path.join(stateRoot, stateDir, "jobs", id + ".log");
+  return path.join(dataDir, "state", stateDirName, "jobs", id + ".log");
 }
 
 function getFakeJobJsonPath(dataDir, id) {
@@ -593,6 +597,106 @@ test("once renders the job with the newest createdAt", () => {
     assert.match(result.stdout, /job newer-job \| status running/);
     assert.match(result.stdout, /Newer job output\./);
     assert.doesNotMatch(result.stdout, /Older job output\./);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("once ignores a newer job in a same-slug decoy state dir", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "correct-state-job",
+      createdAt: "2026-07-09T14:22:58.780Z",
+      lines: [event("Assistant message"), "Correct state output."]
+    });
+    createFakeJob(tempDir, {
+      id: "decoy-state-job",
+      stateDirName: slug + "-ffffffffffffffff",
+      createdAt: "2026-07-09T14:23:58.780Z",
+      lines: [event("Assistant message"), "Decoy state output."]
+    });
+
+    const result = runCodexWatch(["--once"], tempDir);
+
+    assert.strictEqual(result.status, 0);
+    assert.match(result.stdout, /job correct-state-job \| status running/);
+    assert.match(result.stdout, /Correct state output\./);
+    assert.doesNotMatch(result.stdout, /Decoy state output\./);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("once uses the greater job id when createdAt values match", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "tie-a-job",
+      lines: [event("Assistant message"), "Lower id output."]
+    });
+    createFakeJob(tempDir, {
+      id: "tie-b-job",
+      lines: [event("Assistant message"), "Greater id output."]
+    });
+
+    const result = runCodexWatch(["--once"], tempDir);
+
+    assert.strictEqual(result.status, 0);
+    assert.match(result.stdout, /job tie-b-job \| status running/);
+    assert.match(result.stdout, /Greater id output\./);
+    assert.doesNotMatch(result.stdout, /Lower id output\./);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("once prints a completed job banner after the log body", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const bodyLine = "Completed once body.";
+  const banner = "✓ completed · 8s";
+
+  try {
+    createFakeJob(tempDir, {
+      id: "once-completed-job",
+      createdAt: "2026-07-09T14:23:50.000Z",
+      startedAt: "2026-07-09T14:23:50.000Z",
+      completedAt: "2026-07-09T14:23:58.000Z",
+      status: "completed",
+      phase: "completed",
+      lines: [event("Assistant message"), bodyLine, event("Turn completed.")]
+    });
+
+    const result = runCodexWatch(["--once"], tempDir);
+    const bodyIndex = result.stdout.indexOf(bodyLine);
+    const bannerIndex = result.stdout.indexOf(banner);
+
+    assert.strictEqual(result.status, 0);
+    assert.notStrictEqual(bodyIndex, -1);
+    assert.notStrictEqual(bannerIndex, -1);
+    assert.ok(bannerIndex > bodyIndex);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("once prints no completion banner for a running job", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "once-running-job",
+      status: "running",
+      phase: "executing",
+      lines: [event("Assistant message"), "Running job body."]
+    });
+
+    const result = runCodexWatch(["--once"], tempDir);
+
+    assert.strictEqual(result.status, 0);
+    assert.doesNotMatch(result.stdout, /^(?:✓ completed|✗ \S+) · /m);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
