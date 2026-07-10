@@ -1,8 +1,16 @@
 {
   "name": "@cubicj/codex-watch",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Live-tail the newest Codex plugin background job log for the current git repo.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cubicj/codex-watch.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cubicj/codex-watch/issues"
+  },
+  "homepage": "https://github.com/cubicj/codex-watch#readme",
   "publishConfig": {
     "access": "public"
   },

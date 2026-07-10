@@ -32,7 +32,7 @@ codex-watch
 From source:
 
 ```sh
-git clone <repo-url>
+git clone https://github.com/cubicj/codex-watch.git
 cd codex-watch
 npm link
 codex-watch
