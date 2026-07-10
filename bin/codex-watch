@@ -61,6 +61,7 @@ const slug = makeSlug(repoRoot);
 const stateRoot = process.env.CLAUDE_PLUGIN_DATA
   ? path.join(process.env.CLAUDE_PLUGIN_DATA, "state")
   : path.join(os.homedir(), ".claude/plugins/data/codex-openai-codex/state");
+const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 const stateDirPattern = new RegExp("^" + escapeRegExp(slug) + "-[0-9a-f]{6,}$");
 
 let currentJob = null;
@@ -72,6 +73,7 @@ let tailTimer = null;
 let scanTimer = null;
 let waitingPrinted = false;
 let completionBannerPrinted = false;
+let sessionInfoPrinted = false;
 
 process.on("SIGINT", () => {
   clearTimers();
@@ -86,6 +88,7 @@ if (once) {
     process.exit(0);
   }
   printHeader(job);
+  printSessionInfo(job);
   renderWholeLog(job);
   process.exit(0);
 }
@@ -171,7 +174,9 @@ function findNewestJob() {
         displayedCreatedAt: typeof meta.createdAt === "string" && meta.createdAt ? meta.createdAt : createdAt,
         status: typeof meta.status === "string" ? meta.status : "unknown",
         phase: typeof meta.phase === "string" ? meta.phase : "unknown",
-        summary: typeof meta.summary === "string" ? meta.summary : ""
+        summary: typeof meta.summary === "string" ? meta.summary : "",
+        threadId: typeof meta.threadId === "string" ? meta.threadId : "",
+        write: typeof meta.write === "boolean" ? meta.write : false
       });
     }
   }
@@ -220,10 +225,12 @@ function switchToJob(job) {
   assistantBlock = false;
   waitingPrinted = false;
   completionBannerPrinted = false;
+  sessionInfoPrinted = false;
   if (tailTimer) {
     clearInterval(tailTimer);
   }
   printHeader(job);
+  printSessionInfo(job);
   readAvailableLog();
   tailTimer = setInterval(readAvailableLog, 400);
 }
@@ -241,6 +248,84 @@ function printHeader(job) {
   const elapsed = formatElapsed(job.displayedCreatedAt);
   const line = "job " + job.id + " | status " + job.status + " | phase " + job.phase + " | elapsed " + elapsed;
   console.log(color("dim", line));
+}
+
+function printSessionInfo(job) {
+  if (sessionInfoPrinted || !job.threadId) {
+    return;
+  }
+
+  const rolloutPath = findRolloutFile(job.threadId);
+  if (!rolloutPath) {
+    return;
+  }
+
+  const text = readFileText(rolloutPath);
+  let turnContext = null;
+
+  for (const line of text.split(/\r?\n/)) {
+    try {
+      const entry = JSON.parse(line);
+      if (entry && entry.type === "turn_context") {
+        turnContext = entry;
+      }
+    } catch (_error) {}
+  }
+
+  const payload = turnContext && turnContext.payload;
+  if (!payload || typeof payload.model !== "string" || !payload.model) {
+    return;
+  }
+
+  const segments = ["model " + payload.model];
+  if (typeof payload.effort === "string" && payload.effort) {
+    segments.push("effort " + payload.effort);
+  }
+  if (payload.sandbox_policy && typeof payload.sandbox_policy.type === "string" && payload.sandbox_policy.type) {
+    segments.push("sandbox " + payload.sandbox_policy.type);
+  }
+  segments.push(job.write === true ? "write" : "read-only");
+  console.log(color("dim", segments.join(" · ")));
+  sessionInfoPrinted = true;
+}
+
+function findRolloutFile(threadId) {
+  const sessionsRoot = path.join(codexHome, "sessions");
+  const years = safeReadDir(sessionsRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort()
+    .reverse();
+
+  for (const year of years) {
+    const yearDir = path.join(sessionsRoot, year);
+    const months = safeReadDir(yearDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort()
+      .reverse();
+
+    for (const month of months) {
+      const monthDir = path.join(yearDir, month);
+      const days = safeReadDir(monthDir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .sort()
+        .reverse();
+
+      for (const day of days) {
+        const dayDir = path.join(monthDir, day);
+        const rollout = safeReadDir(dayDir, { withFileTypes: true }).find(
+          (entry) => entry.isFile() && entry.name.endsWith("-" + threadId + ".jsonl")
+        );
+        if (rollout) {
+          return path.join(dayDir, rollout.name);
+        }
+      }
+    }
+  }
+
+  return "";
 }
 
 function formatElapsed(createdAt, updatedAt) {
@@ -307,6 +392,9 @@ function checkJobCompletion() {
   }
 
   const status = typeof meta.status === "string" ? meta.status : "unknown";
+  currentJob.threadId = typeof meta.threadId === "string" ? meta.threadId : "";
+  currentJob.write = typeof meta.write === "boolean" ? meta.write : false;
+  printSessionInfo(currentJob);
   if (!isTerminalStatus(status)) {
     return true;
   }

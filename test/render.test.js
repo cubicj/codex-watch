@@ -33,6 +33,12 @@ function createFakeJob(dataDir, options) {
   if (status !== "running" && status !== "queued") {
     job.completedAt = options.completedAt || createdAt;
   }
+  if (typeof options.threadId === "string") {
+    job.threadId = options.threadId;
+  }
+  if (typeof options.write === "boolean") {
+    job.write = options.write;
+  }
 
   fs.mkdirSync(jobsDir, { recursive: true });
   fs.writeFileSync(path.join(jobsDir, options.id + ".json"), JSON.stringify(job));
@@ -41,13 +47,31 @@ function createFakeJob(dataDir, options) {
   return job;
 }
 
+function createFakeRollout(codexHome, threadId, turnContexts) {
+  const sessionsDir = path.join(codexHome, "sessions", "2026", "07", "09");
+  const entries = [
+    { timestamp, type: "session_meta", payload: { id: threadId } },
+    ...turnContexts.map((payload) => ({ timestamp, type: "turn_context", payload }))
+  ];
+
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(sessionsDir, "rollout-2026-07-09T23-23-59-" + threadId + ".jsonl"),
+    entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n"
+  );
+}
+
 function getFakeJobLogPath(dataDir, id) {
   const stateRoot = path.join(dataDir, "state");
   const stateDir = fs.readdirSync(stateRoot)[0];
   return path.join(stateRoot, stateDir, "jobs", id + ".log");
 }
 
-function runCodexWatch(args, dataDir) {
+function getFakeJobJsonPath(dataDir, id) {
+  return getFakeJobLogPath(dataDir, id).replace(/\.log$/, ".json");
+}
+
+function runCodexWatch(args, dataDir, codexHome = path.join(dataDir, "codex-home")) {
   const stdoutPath = path.join(dataDir, "stdout.txt");
   const stdoutFd = fs.openSync(stdoutPath, "w");
 
@@ -56,7 +80,8 @@ function runCodexWatch(args, dataDir) {
       encoding: "utf8",
       env: {
         ...process.env,
-        CLAUDE_PLUGIN_DATA: dataDir
+        CLAUDE_PLUGIN_DATA: dataDir,
+        CODEX_HOME: codexHome
       },
       stdio: ["ignore", stdoutFd, "pipe"]
     });
@@ -70,7 +95,7 @@ function runCodexWatch(args, dataDir) {
   }
 }
 
-function runFollowMode(args, dataDir, durationMs) {
+function runFollowMode(args, dataDir, durationMs, codexHome = path.join(dataDir, "codex-home")) {
   const stdoutPath = path.join(dataDir, "stdout.txt");
   const stdoutFd = fs.openSync(stdoutPath, "w");
 
@@ -100,7 +125,8 @@ function runFollowMode(args, dataDir, durationMs) {
       child = spawn(process.execPath, [bin, ...args], {
         env: {
           ...process.env,
-          CLAUDE_PLUGIN_DATA: dataDir
+          CLAUDE_PLUGIN_DATA: dataDir,
+          CODEX_HOME: codexHome
         },
         stdio: ["ignore", stdoutFd, "pipe"]
       });
@@ -131,6 +157,147 @@ test("header contains the job id and status", () => {
     assert.strictEqual(result.status, 0);
     assert.match(result.stdout, /job header-job \| status completed/);
   } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("once renders session info under the job header", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const codexHome = path.join(tempDir, "codex-home");
+  const threadId = "123e4567-e89b-12d3-a456-426614174001";
+  const expected = "model gpt-5.4-mini · effort low · sandbox danger-full-access · write";
+
+  try {
+    createFakeJob(tempDir, {
+      id: "session-info-job",
+      threadId,
+      write: true,
+      lines: [event("Starting Codex Task.")]
+    });
+    createFakeRollout(codexHome, threadId, [
+      {
+        model: "gpt-5.4-mini",
+        effort: "low",
+        sandbox_policy: { type: "danger-full-access" }
+      }
+    ]);
+
+    const result = runCodexWatch(["--once"], tempDir, codexHome);
+    const outputLines = result.stdout.split(/\r?\n/);
+    const headerIndex = outputLines.findIndex((line) => line.startsWith("job session-info-job "));
+
+    assert.strictEqual(result.status, 0);
+    assert.notStrictEqual(headerIndex, -1);
+    assert.strictEqual(outputLines[headerIndex + 1], expected);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("once omits session info when no rollout exists", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "missing-rollout-job",
+      threadId: "123e4567-e89b-12d3-a456-426614174002",
+      lines: [event("Starting Codex Task.")]
+    });
+
+    const result = runCodexWatch(["--once"], tempDir);
+
+    assert.strictEqual(result.status, 0);
+    assert.doesNotMatch(result.stdout, /^model /m);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("once uses the last rollout turn context", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const codexHome = path.join(tempDir, "codex-home");
+  const threadId = "123e4567-e89b-12d3-a456-426614174003";
+
+  try {
+    createFakeJob(tempDir, {
+      id: "last-turn-context-job",
+      threadId,
+      lines: [event("Starting Codex Task.")]
+    });
+    createFakeRollout(codexHome, threadId, [
+      { model: "gpt-5.3", effort: "high" },
+      { model: "gpt-5.4-mini", effort: "low" }
+    ]);
+
+    const result = runCodexWatch(["--once"], tempDir, codexHome);
+
+    assert.strictEqual(result.status, 0);
+    assert.match(result.stdout, /^model gpt-5\.4-mini · effort low · read-only$/m);
+    assert.doesNotMatch(result.stdout, /^model gpt-5\.3 /m);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("once renders read-only when write is absent or false", () => {
+  for (const write of [undefined, false]) {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+    const codexHome = path.join(tempDir, "codex-home");
+    const suffix = write === false ? "false" : "absent";
+    const threadId = "123e4567-e89b-12d3-a456-4266141740" + (write === false ? "05" : "04");
+
+    try {
+      createFakeJob(tempDir, {
+        id: "read-only-" + suffix + "-job",
+        threadId,
+        write,
+        lines: [event("Starting Codex Task.")]
+      });
+      createFakeRollout(codexHome, threadId, [{ model: "gpt-5.4-mini" }]);
+
+      const result = runCodexWatch(["--once"], tempDir, codexHome);
+
+      assert.strictEqual(result.status, 0);
+      assert.match(result.stdout, /^model gpt-5\.4-mini · read-only$/m);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("follow mode prints session info once when threadId appears", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const codexHome = path.join(tempDir, "codex-home");
+  const threadId = "123e4567-e89b-12d3-a456-426614174006";
+  const expected = "model gpt-5.4-mini · effort low · sandbox danger-full-access · write";
+  let rewriteTimer = null;
+
+  try {
+    const job = createFakeJob(tempDir, {
+      id: "late-thread-id-job",
+      status: "running",
+      phase: "executing",
+      lines: [event("Starting Codex Task.")]
+    });
+    createFakeRollout(codexHome, threadId, [
+      {
+        model: "gpt-5.4-mini",
+        effort: "low",
+        sandbox_policy: { type: "danger-full-access" }
+      }
+    ]);
+
+    const stdoutPromise = runFollowMode([], tempDir, 1800, codexHome);
+    rewriteTimer = setTimeout(() => {
+      fs.writeFileSync(getFakeJobJsonPath(tempDir, job.id), JSON.stringify({ ...job, threadId, write: true }));
+    }, 600);
+
+    const stdout = await stdoutPromise;
+    const occurrences = stdout.split(/\r?\n/).filter((line) => line === expected).length;
+
+    assert.strictEqual(occurrences, 1);
+  } finally {
+    clearTimeout(rewriteTimer);
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
