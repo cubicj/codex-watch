@@ -4,6 +4,8 @@ Live-tail the newest Codex plugin background job log for the current git repo.
 
 `codex-watch` is a zero-dependency terminal companion for the [`openai/codex-plugin-cc`](https://github.com/openai/codex-plugin-cc) Claude Code plugin. When Claude Code delegates work to a background Codex job, run `codex-watch` in that repo's terminal to follow the job's log live — and it keeps following across `--resume`.
 
+![codex-watch following a background Codex job: a cancelled job, automatic switch to the new job, session info, colored command results, and the completion banner](https://raw.githubusercontent.com/cubicj/codex-watch/main/assets/screenshot.png)
+
 ## What It Does
 
 - Resolves the git repo from the terminal's current working directory.
