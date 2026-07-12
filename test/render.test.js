@@ -20,6 +20,10 @@ function event(value) {
   return "[" + timestamp + "] " + value;
 }
 
+function eventAt(eventTimestamp, value) {
+  return "[" + eventTimestamp + "] " + value;
+}
+
 function createFakeJob(dataDir, options) {
   const jobsDir = path.join(dataDir, "state", options.stateDirName || stateDirName, "jobs");
   const status = options.status || "running";
@@ -56,10 +60,10 @@ function createFakeJob(dataDir, options) {
   return job;
 }
 
-function createFakeRollout(codexHome, threadId, turnContexts) {
+function createFakeRollout(codexHome, threadId, turnContexts, options = {}) {
   const sessionsDir = path.join(codexHome, "sessions", "2026", "07", "09");
   const entries = [
-    { timestamp, type: "session_meta", payload: { id: threadId } },
+    { timestamp, type: "session_meta", payload: { id: threadId, cwd: options.cwd || repoRoot } },
     ...turnContexts.map((turnContext) => {
       if (turnContext && typeof turnContext === "object" && Object.hasOwn(turnContext, "payload")) {
         return {
@@ -69,7 +73,17 @@ function createFakeRollout(codexHome, threadId, turnContexts) {
         };
       }
       return { timestamp, type: "turn_context", payload: turnContext };
-    })
+    }),
+    ...(options.patchApplyEvents || []).map((patchApplyEvent) => ({
+      timestamp: patchApplyEvent.timestamp,
+      type: "event_msg",
+      payload: {
+        type: "patch_apply_end",
+        call_id: patchApplyEvent.callId || "call-1",
+        success: patchApplyEvent.success !== false,
+        changes: patchApplyEvent.changes
+      }
+    }))
   ];
   const rolloutPath = path.join(sessionsDir, "rollout-2026-07-09T23-23-59-" + threadId + ".jsonl");
 
@@ -638,6 +652,162 @@ test("command completion uses success and failure prefixes", () => {
     assert.strictEqual(result.status, 0);
     assert.match(result.stdout, /^✓ Command completed: x \(exit 0\)$/m);
     assert.match(result.stdout, /^✗ Command completed: x \(exit 1\)$/m);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("applying file changes renders a matching updated file relative to rollout cwd", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const codexHome = path.join(tempDir, "codex-home");
+  const threadId = "123e4567-e89b-12d3-a456-426614174010";
+  const changedPath = path.join(repoRoot, "bin", "codex-watch");
+
+  try {
+    createFakeJob(tempDir, {
+      id: "single-file-change-job",
+      threadId,
+      lines: [event("Applying 1 file change(s).")]
+    });
+    createFakeRollout(codexHome, threadId, [], {
+      patchApplyEvents: [{ timestamp, changes: { [changedPath]: { type: "update" } } }]
+    });
+
+    const result = runCodexWatch(["--once"], tempDir, codexHome);
+
+    assert.strictEqual(result.status, 0);
+    assert.match(result.stdout, /^Applying 1 file change\(s\)\.$/m);
+    assert.match(result.stdout, /^  M bin\/codex-watch$/m);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("applying file changes renders update add and delete files in rollout order", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const codexHome = path.join(tempDir, "codex-home");
+  const threadId = "123e4567-e89b-12d3-a456-426614174011";
+  const changes = {
+    [path.join(repoRoot, "bin", "codex-watch")]: { type: "update" },
+    [path.join(repoRoot, "test", "new.test.js")]: { type: "add" },
+    [path.join(repoRoot, "old.txt")]: { type: "delete" }
+  };
+
+  try {
+    createFakeJob(tempDir, {
+      id: "multiple-file-changes-job",
+      threadId,
+      lines: [event("Applying 3 file change(s).")]
+    });
+    createFakeRollout(codexHome, threadId, [], {
+      patchApplyEvents: [{ timestamp, changes }]
+    });
+
+    const result = runCodexWatch(["--once"], tempDir, codexHome);
+    const outputLines = result.stdout.split(/\r?\n/);
+    const applyingIndex = outputLines.indexOf("Applying 3 file change(s).");
+
+    assert.strictEqual(result.status, 0);
+    assert.notStrictEqual(applyingIndex, -1);
+    assert.deepStrictEqual(outputLines.slice(applyingIndex + 1, applyingIndex + 4), [
+      "  M bin/codex-watch",
+      "  A test/new.test.js",
+      "  D old.txt"
+    ]);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("applying file changes stays plain when no rollout exists", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "missing-file-change-rollout-job",
+      threadId: "123e4567-e89b-12d3-a456-426614174012",
+      lines: [event("Applying 1 file change(s).")]
+    });
+
+    const result = runCodexWatch(["--once"], tempDir);
+
+    assert.strictEqual(result.status, 0);
+    assert.match(result.stdout, /^Applying 1 file change\(s\)\.$/m);
+    assert.doesNotMatch(result.stdout, /^  [MAD] /m);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("applying file changes ignores rollout events outside the two second window", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const codexHome = path.join(tempDir, "codex-home");
+  const threadId = "123e4567-e89b-12d3-a456-426614174013";
+  const changedPath = path.join(repoRoot, "outside-window.txt");
+
+  try {
+    createFakeJob(tempDir, {
+      id: "outside-window-file-change-job",
+      threadId,
+      lines: [event("Applying 1 file change(s).")]
+    });
+    createFakeRollout(codexHome, threadId, [], {
+      patchApplyEvents: [{
+        timestamp: "2026-07-09T14:24:00.781Z",
+        changes: { [changedPath]: { type: "update" } }
+      }]
+    });
+
+    const result = runCodexWatch(["--once"], tempDir, codexHome);
+
+    assert.strictEqual(result.status, 0);
+    assert.match(result.stdout, /^Applying 1 file change\(s\)\.$/m);
+    assert.doesNotMatch(result.stdout, /outside-window\.txt/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("consecutive applying file changes consume matching rollout events in order", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const codexHome = path.join(tempDir, "codex-home");
+  const threadId = "123e4567-e89b-12d3-a456-426614174014";
+  const secondTimestamp = "2026-07-09T14:23:59.780Z";
+
+  try {
+    createFakeJob(tempDir, {
+      id: "ordered-file-changes-job",
+      threadId,
+      lines: [
+        event("Applying 1 file change(s)."),
+        eventAt(secondTimestamp, "Applying 1 file change(s).")
+      ]
+    });
+    createFakeRollout(codexHome, threadId, [], {
+      patchApplyEvents: [
+        {
+          timestamp: "2026-07-09T14:23:58.785Z",
+          callId: "call-1",
+          changes: { [path.join(repoRoot, "first.txt")]: { type: "update" } }
+        },
+        {
+          timestamp: "2026-07-09T14:23:59.790Z",
+          callId: "call-2",
+          changes: { [path.join(repoRoot, "second.txt")]: { type: "add" } }
+        }
+      ]
+    });
+
+    const result = runCodexWatch(["--once"], tempDir, codexHome);
+    const outputLines = result.stdout.split(/\r?\n/);
+    const applyingIndexes = outputLines
+      .map((line, index) => line === "Applying 1 file change(s)." ? index : -1)
+      .filter((index) => index !== -1);
+
+    assert.strictEqual(result.status, 0);
+    assert.strictEqual(applyingIndexes.length, 2);
+    assert.strictEqual(outputLines[applyingIndexes[0] + 1], "  M first.txt");
+    assert.strictEqual(outputLines[applyingIndexes[1] + 1], "  A second.txt");
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

@@ -78,6 +78,7 @@ let sessionInfoPrinted = false;
 let requestedSessionInfoPrinted = false;
 let sessionRolloutPath = "";
 let lastRolloutSearchAt = null;
+let consumedPatchApplyEvents = new Set();
 
 process.on("SIGINT", () => {
   clearTimers();
@@ -240,6 +241,7 @@ function switchToJob(job) {
   requestedSessionInfoPrinted = false;
   sessionRolloutPath = "";
   lastRolloutSearchAt = null;
+  consumedPatchApplyEvents = new Set();
   if (tailTimer) {
     clearInterval(tailTimer);
   }
@@ -274,18 +276,9 @@ function printSessionInfo(job) {
     return;
   }
 
-  if (!sessionRolloutPath) {
-    const now = Date.now();
-    if (lastRolloutSearchAt !== null && now - lastRolloutSearchAt < 5000) {
-      printRequestedSessionInfo(job);
-      return;
-    }
-    lastRolloutSearchAt = now;
-    sessionRolloutPath = findRolloutFile(job.threadId);
-    if (!sessionRolloutPath) {
-      printRequestedSessionInfo(job);
-      return;
-    }
+  if (!resolveSessionRolloutPath(job)) {
+    printRequestedSessionInfo(job);
+    return;
   }
 
   const text = readFileText(sessionRolloutPath);
@@ -344,6 +337,23 @@ function printRequestedSessionInfo(job) {
   }
   console.log(color("dim", segments.join(" · ")));
   requestedSessionInfoPrinted = true;
+}
+
+function resolveSessionRolloutPath(job) {
+  if (sessionRolloutPath) {
+    return sessionRolloutPath;
+  }
+  if (!job || !job.threadId) {
+    return "";
+  }
+
+  const now = Date.now();
+  if (lastRolloutSearchAt !== null && now - lastRolloutSearchAt < 5000) {
+    return "";
+  }
+  lastRolloutSearchAt = now;
+  sessionRolloutPath = findRolloutFile(job.threadId);
+  return sessionRolloutPath;
 }
 
 function findRolloutFile(threadId) {
@@ -407,7 +417,7 @@ function formatElapsed(createdAt, updatedAt) {
 
 function renderWholeLog(job) {
   const text = readFileText(job.logPath);
-  renderText(text);
+  renderText(text, false, job);
 }
 
 function readAvailableLog() {
@@ -428,7 +438,7 @@ function readAvailableLog() {
       const chunk = readFileChunk(currentJob.logPath, logOffset, stat.size - logOffset);
       if (chunk !== null) {
         logOffset += chunk.length;
-        renderText(logDecoder.write(chunk), true);
+        renderText(logDecoder.write(chunk), true, currentJob);
       }
     }
   }
@@ -505,7 +515,7 @@ function readFileChunk(file, start, length) {
   }
 }
 
-function renderText(text, keepPartial) {
+function renderText(text, keepPartial, job) {
   if (!text) {
     return;
   }
@@ -522,12 +532,12 @@ function renderText(text, keepPartial) {
   }
 
   for (const line of lines) {
-    renderLine(line);
+    renderLine(line, job);
   }
 }
 
-function renderLine(line) {
-  const match = line.match(/^\[\d{4}-\d{2}-\d{2}T[^\]]*\]\s+(.*)$/);
+function renderLine(line, job) {
+  const match = line.match(/^\[(\d{4}-\d{2}-\d{2}T[^\]]*)\]\s+(.*)$/);
   if (!match) {
     if (assistantBlock) {
       console.log(assistantText(line));
@@ -537,7 +547,8 @@ function renderLine(line) {
     return;
   }
 
-  const event = match[1];
+  const eventTimestamp = match[1];
+  const event = match[2];
 
   if (event === "Assistant message") {
     assistantBlock = true;
@@ -571,7 +582,13 @@ function renderLine(line) {
     return;
   }
 
-  if (event.startsWith("File changes") || /^Applying [0-9]+ file change\(s\)\.$/.test(event) || event === "File changes completed.") {
+  if (/^Applying [0-9]+ file change\(s\)\.$/.test(event)) {
+    console.log(color("yellow", event));
+    renderAppliedFiles(eventTimestamp, job);
+    return;
+  }
+
+  if (event.startsWith("File changes") || event === "File changes completed.") {
     console.log(color("yellow", event));
     return;
   }
@@ -582,6 +599,81 @@ function renderLine(line) {
   }
 
   console.log(event);
+}
+
+function renderAppliedFiles(eventTimestamp, job) {
+  const rolloutPath = resolveSessionRolloutPath(job);
+  if (!rolloutPath) {
+    return;
+  }
+
+  const targetTime = Date.parse(eventTimestamp);
+  if (!Number.isFinite(targetTime)) {
+    return;
+  }
+
+  const text = readFileText(rolloutPath);
+  let sessionCwd = process.cwd();
+  let nearest = null;
+
+  for (const [index, line] of text.split(/\r?\n/).entries()) {
+    try {
+      const entry = JSON.parse(line);
+      if (
+        entry &&
+        entry.type === "session_meta" &&
+        entry.payload &&
+        typeof entry.payload.cwd === "string" &&
+        entry.payload.cwd
+      ) {
+        sessionCwd = entry.payload.cwd;
+      }
+      if (
+        consumedPatchApplyEvents.has(index) ||
+        !entry ||
+        entry.type !== "event_msg" ||
+        !entry.payload ||
+        entry.payload.type !== "patch_apply_end"
+      ) {
+        continue;
+      }
+
+      const patchTime = Date.parse(entry.timestamp);
+      const difference = Math.abs(patchTime - targetTime);
+      if (!Number.isFinite(difference) || difference > 2000) {
+        continue;
+      }
+      if (!nearest || difference < nearest.difference) {
+        nearest = { index, difference, changes: entry.payload.changes };
+      }
+    } catch (_error) {}
+  }
+
+  if (!nearest) {
+    return;
+  }
+  consumedPatchApplyEvents.add(nearest.index);
+  if (!nearest.changes || typeof nearest.changes !== "object" || Array.isArray(nearest.changes)) {
+    return;
+  }
+
+  for (const [file, change] of Object.entries(nearest.changes)) {
+    const type = change && change.type;
+    const marker = type === "update" ? "M" : type === "add" ? "A" : type === "delete" ? "D" : String(type);
+    console.log(color("dim", "  " + marker + " " + renderChangedPath(file, sessionCwd)));
+  }
+}
+
+function renderChangedPath(file, sessionCwd) {
+  if (!path.isAbsolute(file)) {
+    return file;
+  }
+
+  const relative = path.relative(sessionCwd, file);
+  if (relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative)) {
+    return relative || ".";
+  }
+  return file;
 }
 
 function truncate(value) {

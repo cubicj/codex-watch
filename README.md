@@ -13,6 +13,7 @@ Live-tail the newest Codex plugin background job log for the current git repo.
 - Auto-switches when a `--resume` starts a newer job id, so a resumed run is picked up without restarting.
 - Shows the job's model, reasoning effort, sandbox mode, and write access under the header (resolved from the Codex CLI session files in `$CODEX_HOME`, default `~/.codex`).
 - Colorizes assistant messages, command status, file changes, and job events.
+- Lists each applied file with its change type and a workspace-relative path when available.
 - Prints a completion banner such as `✓ completed · <duration>` or `✗ <status> · <duration>`.
 - Drops duplicate captured lines.
 
