@@ -634,6 +634,69 @@ test("assistant message captured preamble is suppressed", () => {
   }
 });
 
+test("thinking event renders a Thinking indicator", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "thinking-job",
+      lines: [event("Thinking.")]
+    });
+
+    const result = runCodexWatch(["--once"], tempDir);
+    const thinkingLines = result.stdout.split(/\r?\n/).filter((line) => line === "Thinking...");
+
+    assert.strictEqual(result.status, 0);
+    assert.deepStrictEqual(thinkingLines, ["Thinking..."]);
+    assert.doesNotMatch(result.stdout, /^Thinking\.$/m);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("consecutive thinking events render one Thinking indicator", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "consecutive-thinking-job",
+      lines: [event("Thinking."), event("Thinking."), event("Thinking.")]
+    });
+
+    const result = runCodexWatch(["--once"], tempDir);
+    const thinkingLines = result.stdout.split(/\r?\n/).filter((line) => line === "Thinking...");
+
+    assert.strictEqual(result.status, 0);
+    assert.deepStrictEqual(thinkingLines, ["Thinking..."]);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("rendered output resets the Thinking indicator collapse", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "separated-thinking-job",
+      lines: [event("Thinking."), event("Running command: x"), event("Thinking.")]
+    });
+
+    const result = runCodexWatch(["--once"], tempDir);
+    const outputLines = result.stdout.split(/\r?\n/);
+    const firstThinkingIndex = outputLines.indexOf("Thinking...");
+    const commandIndex = outputLines.indexOf("Running command: x");
+    const lastThinkingIndex = outputLines.lastIndexOf("Thinking...");
+
+    assert.strictEqual(result.status, 0);
+    assert.ok(firstThinkingIndex < commandIndex);
+    assert.ok(commandIndex < lastThinkingIndex);
+    assert.strictEqual(outputLines.filter((line) => line === "Thinking...").length, 2);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("command completion uses success and failure prefixes", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
 

@@ -76,6 +76,7 @@ let waitingPrinted = false;
 let completionBannerPrinted = false;
 let sessionInfoPrinted = false;
 let requestedSessionInfoPrinted = false;
+let thinkingIndicatorPrinted = false;
 let sessionRolloutPath = "";
 let lastRolloutSearchAt = null;
 let consumedPatchApplyEvents = new Set();
@@ -239,6 +240,7 @@ function switchToJob(job) {
   completionBannerPrinted = false;
   sessionInfoPrinted = false;
   requestedSessionInfoPrinted = false;
+  thinkingIndicatorPrinted = false;
   sessionRolloutPath = "";
   lastRolloutSearchAt = null;
   consumedPatchApplyEvents = new Set();
@@ -539,6 +541,7 @@ function renderText(text, keepPartial, job) {
 function renderLine(line, job) {
   const match = line.match(/^\[(\d{4}-\d{2}-\d{2}T[^\]]*)\]\s+(.*)$/);
   if (!match) {
+    thinkingIndicatorPrinted = false;
     if (assistantBlock) {
       console.log(assistantText(line));
     } else {
@@ -560,6 +563,16 @@ function renderLine(line, job) {
   if (event.startsWith("Assistant message captured:")) {
     return;
   }
+
+  if (event === "Thinking.") {
+    if (!thinkingIndicatorPrinted) {
+      console.log(color("dim", "Thinking..."));
+      thinkingIndicatorPrinted = true;
+    }
+    return;
+  }
+
+  thinkingIndicatorPrinted = false;
 
   if (event.startsWith("Running command: ")) {
     console.log(color("dim", color("blue", "Running command: " + truncate(event.slice("Running command: ".length)))));
