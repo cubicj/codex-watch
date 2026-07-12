@@ -45,6 +45,9 @@ function createFakeJob(dataDir, options) {
   if (typeof options.write === "boolean") {
     job.write = options.write;
   }
+  if (options.request && typeof options.request === "object") {
+    job.request = options.request;
+  }
 
   fs.mkdirSync(jobsDir, { recursive: true });
   fs.writeFileSync(path.join(jobsDir, options.id + ".json"), JSON.stringify(job));
@@ -209,7 +212,81 @@ test("once renders session info under the job header", () => {
   }
 });
 
-test("once omits session info when no rollout exists", () => {
+test("once renders requested model when no rollout exists", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "requested-model-job",
+      threadId: "123e4567-e89b-12d3-a456-42661417400a",
+      request: { model: "gpt-5.3-codex-spark", effort: null, write: false },
+      lines: [event("Starting Codex Task.")]
+    });
+
+    const result = runCodexWatch(["--once"], tempDir);
+
+    assert.strictEqual(result.status, 0);
+    assert.match(result.stdout, /^model gpt-5\.3-codex-spark \(requested\)$/m);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("once renders requested model and effort when no rollout exists", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "requested-model-effort-job",
+      threadId: "123e4567-e89b-12d3-a456-42661417400b",
+      request: { model: "gpt-5.3-codex-spark", effort: "high", write: true },
+      lines: [event("Starting Codex Task.")]
+    });
+
+    const result = runCodexWatch(["--once"], tempDir);
+
+    assert.strictEqual(result.status, 0);
+    assert.match(
+      result.stdout,
+      /^model gpt-5\.3-codex-spark \(requested\) · effort high \(requested\)$/m
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("once prefers rollout session info over requested values", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const codexHome = path.join(tempDir, "codex-home");
+  const threadId = "123e4567-e89b-12d3-a456-42661417400c";
+
+  try {
+    createFakeJob(tempDir, {
+      id: "rollout-over-request-job",
+      threadId,
+      write: true,
+      request: { model: "requested-model", effort: "low", write: false },
+      lines: [event("Starting Codex Task.")]
+    });
+    createFakeRollout(codexHome, threadId, [
+      {
+        model: "resolved-model",
+        effort: "high",
+        sandbox_policy: { type: "danger-full-access" }
+      }
+    ]);
+
+    const result = runCodexWatch(["--once"], tempDir, codexHome);
+
+    assert.strictEqual(result.status, 0);
+    assert.match(result.stdout, /^model resolved-model · effort high · sandbox danger-full-access · write$/m);
+    assert.doesNotMatch(result.stdout, /requested/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("once omits session info without request or rollout", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
 
   try {
@@ -390,6 +467,7 @@ test("follow mode waits for a qualifying rollout turn context", async () => {
       id: "late-turn-context-job",
       startedAt: "2026-07-09T14:24:00.000Z",
       threadId,
+      request: { model: "requested-model", effort: "medium" },
       lines: [event("Starting Codex Task.")]
     });
     const rolloutPath = createFakeRollout(codexHome, threadId, [
@@ -414,7 +492,10 @@ test("follow mode waits for a qualifying rollout turn context", async () => {
     const stdout = await stdoutPromise;
     const sessionInfoLines = stdout.split(/\r?\n/).filter((line) => line.startsWith("model "));
 
-    assert.deepStrictEqual(sessionInfoLines, [expected]);
+    assert.deepStrictEqual(sessionInfoLines, [
+      "model requested-model (requested) · effort medium (requested)",
+      expected
+    ]);
   } finally {
     clearTimeout(appendTimer);
     fs.rmSync(tempDir, { recursive: true, force: true });

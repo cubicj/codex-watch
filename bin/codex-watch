@@ -75,6 +75,7 @@ let scanTimer = null;
 let waitingPrinted = false;
 let completionBannerPrinted = false;
 let sessionInfoPrinted = false;
+let requestedSessionInfoPrinted = false;
 let sessionRolloutPath = "";
 let lastRolloutSearchAt = null;
 
@@ -183,7 +184,8 @@ function findNewestJob() {
       phase: typeof meta.phase === "string" ? meta.phase : "unknown",
       summary: typeof meta.summary === "string" ? meta.summary : "",
       threadId: typeof meta.threadId === "string" ? meta.threadId : "",
-      write: typeof meta.write === "boolean" ? meta.write : false
+      write: typeof meta.write === "boolean" ? meta.write : false,
+      request: meta.request && typeof meta.request === "object" ? meta.request : null
     });
   }
 
@@ -235,6 +237,7 @@ function switchToJob(job) {
   waitingPrinted = false;
   completionBannerPrinted = false;
   sessionInfoPrinted = false;
+  requestedSessionInfoPrinted = false;
   sessionRolloutPath = "";
   lastRolloutSearchAt = null;
   if (tailTimer) {
@@ -262,18 +265,25 @@ function printHeader(job) {
 }
 
 function printSessionInfo(job) {
-  if (sessionInfoPrinted || !job.threadId) {
+  if (sessionInfoPrinted) {
+    return;
+  }
+
+  if (!job.threadId) {
+    printRequestedSessionInfo(job);
     return;
   }
 
   if (!sessionRolloutPath) {
     const now = Date.now();
     if (lastRolloutSearchAt !== null && now - lastRolloutSearchAt < 5000) {
+      printRequestedSessionInfo(job);
       return;
     }
     lastRolloutSearchAt = now;
     sessionRolloutPath = findRolloutFile(job.threadId);
     if (!sessionRolloutPath) {
+      printRequestedSessionInfo(job);
       return;
     }
   }
@@ -301,6 +311,7 @@ function printSessionInfo(job) {
 
   const payload = turnContext && turnContext.payload;
   if (!payload || typeof payload.model !== "string" || !payload.model) {
+    printRequestedSessionInfo(job);
     return;
   }
 
@@ -314,6 +325,25 @@ function printSessionInfo(job) {
   segments.push(job.write === true ? "write" : "read-only");
   console.log(color("dim", segments.join(" · ")));
   sessionInfoPrinted = true;
+}
+
+function printRequestedSessionInfo(job) {
+  const request = job.request;
+  if (
+    requestedSessionInfoPrinted ||
+    !request ||
+    typeof request.model !== "string" ||
+    !request.model
+  ) {
+    return;
+  }
+
+  const segments = ["model " + request.model + " (requested)"];
+  if (typeof request.effort === "string" && request.effort) {
+    segments.push("effort " + request.effort + " (requested)");
+  }
+  console.log(color("dim", segments.join(" · ")));
+  requestedSessionInfoPrinted = true;
 }
 
 function findRolloutFile(threadId) {
@@ -407,10 +437,6 @@ function readAvailableLog() {
 }
 
 function checkJobCompletion() {
-  if (completionBannerPrinted) {
-    return;
-  }
-
   let meta = null;
   try {
     meta = JSON.parse(fs.readFileSync(currentJob.jsonPath, "utf8"));
@@ -422,7 +448,11 @@ function checkJobCompletion() {
   currentJob.threadId = typeof meta.threadId === "string" ? meta.threadId : "";
   currentJob.write = typeof meta.write === "boolean" ? meta.write : false;
   currentJob.startedAt = typeof meta.startedAt === "string" ? meta.startedAt : "";
+  currentJob.request = meta.request && typeof meta.request === "object" ? meta.request : null;
   printSessionInfo(currentJob);
+  if (completionBannerPrinted) {
+    return;
+  }
   if (!isTerminalStatus(status)) {
     return;
   }
