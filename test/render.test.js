@@ -237,7 +237,7 @@ test("once renders session info under the job header", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
   const codexHome = path.join(tempDir, "codex-home");
   const threadId = "123e4567-e89b-12d3-a456-426614174001";
-  const expected = "model gpt-5.4-mini · effort low · sandbox danger-full-access · write";
+  const expected = "model gpt-5.4-mini · effort low · sandbox danger-full-access";
 
   try {
     createFakeJob(tempDir, {
@@ -333,7 +333,7 @@ test("once prefers rollout session info over requested values", () => {
     const result = runCodexWatch(["--once"], tempDir, codexHome);
 
     assert.strictEqual(result.status, 0);
-    assert.match(result.stdout, /^model resolved-model · effort high · sandbox danger-full-access · write$/m);
+    assert.match(result.stdout, /^model resolved-model · effort high · sandbox danger-full-access$/m);
     assert.doesNotMatch(result.stdout, /requested/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -378,7 +378,7 @@ test("once uses the last rollout turn context", () => {
     const result = runCodexWatch(["--once"], tempDir, codexHome);
 
     assert.strictEqual(result.status, 0);
-    assert.match(result.stdout, /^model gpt-5\.4-mini · effort low · read-only$/m);
+    assert.match(result.stdout, /^model gpt-5\.4-mini · effort low$/m);
     assert.doesNotMatch(result.stdout, /^model gpt-5\.3 /m);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -439,14 +439,14 @@ test("once uses the latest qualifying rollout turn context", () => {
     const result = runCodexWatch(["--once"], tempDir, codexHome);
 
     assert.strictEqual(result.status, 0);
-    assert.match(result.stdout, /^model fresh-model · read-only$/m);
+    assert.match(result.stdout, /^model fresh-model$/m);
     assert.doesNotMatch(result.stdout, /^model stale-model /m);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
 
-test("once renders read-only when write is absent or false", () => {
+test("once renders no access suffix when write is absent or false", () => {
   for (const write of [undefined, false]) {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
     const codexHome = path.join(tempDir, "codex-home");
@@ -465,7 +465,7 @@ test("once renders read-only when write is absent or false", () => {
       const result = runCodexWatch(["--once"], tempDir, codexHome);
 
       assert.strictEqual(result.status, 0);
-      assert.match(result.stdout, /^model gpt-5\.4-mini · read-only$/m);
+      assert.match(result.stdout, /^model gpt-5\.4-mini$/m);
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
@@ -476,7 +476,7 @@ test("follow mode prints session info once when threadId appears", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
   const codexHome = path.join(tempDir, "codex-home");
   const threadId = "123e4567-e89b-12d3-a456-426614174006";
-  const expected = "model gpt-5.4-mini · effort low · sandbox danger-full-access · write";
+  const expected = "model gpt-5.4-mini · effort low · sandbox danger-full-access";
   let rewriteTimer = null;
 
   try {
@@ -513,7 +513,7 @@ test("follow mode waits for a qualifying rollout turn context", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
   const codexHome = path.join(tempDir, "codex-home");
   const threadId = "123e4567-e89b-12d3-a456-426614174009";
-  const expected = "model fresh-model · effort high · read-only";
+  const expected = "model fresh-model · effort high";
   let appendTimer = null;
 
   try {

@@ -225,7 +225,6 @@ function collectJobs() {
         phase: typeof meta.phase === "string" ? meta.phase : "unknown",
         summary: typeof meta.summary === "string" ? meta.summary : "",
         threadId: typeof meta.threadId === "string" ? meta.threadId : "",
-        write: typeof meta.write === "boolean" ? meta.write : false,
         request: meta.request && typeof meta.request === "object" ? meta.request : null
       });
     }
@@ -386,7 +385,6 @@ function printSessionInfo(job) {
   if (payload.sandbox_policy && typeof payload.sandbox_policy.type === "string" && payload.sandbox_policy.type) {
     segments.push("sandbox " + payload.sandbox_policy.type);
   }
-  segments.push(job.write === true ? "write" : "read-only");
   console.log(color("dim", segments.join(" · ")));
   sessionInfoPrinted = true;
 }
@@ -532,7 +530,6 @@ function checkJobCompletion() {
 
   const status = typeof meta.status === "string" ? meta.status : "unknown";
   currentJob.threadId = typeof meta.threadId === "string" ? meta.threadId : "";
-  currentJob.write = typeof meta.write === "boolean" ? meta.write : false;
   currentJob.startedAt = typeof meta.startedAt === "string" ? meta.startedAt : "";
   currentJob.request = meta.request && typeof meta.request === "object" ? meta.request : null;
   printSessionInfo(currentJob);
