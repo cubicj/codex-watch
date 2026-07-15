@@ -91,6 +91,7 @@ let waitingPrinted = false;
 let completionBannerPrinted = false;
 let sessionInfoPrinted = false;
 let requestedSessionInfoPrinted = false;
+let resolvedSessionInfoPrinted = false;
 let thinkingIndicatorPrinted = false;
 let sessionRolloutPath = "";
 let lastRolloutSearchAt = null;
@@ -225,7 +226,8 @@ function collectJobs() {
         phase: typeof meta.phase === "string" ? meta.phase : "unknown",
         summary: typeof meta.summary === "string" ? meta.summary : "",
         threadId: typeof meta.threadId === "string" ? meta.threadId : "",
-        request: meta.request && typeof meta.request === "object" ? meta.request : null
+        request: meta.request && typeof meta.request === "object" ? meta.request : null,
+        resolved: normalizeResolved(meta.resolved)
       });
     }
   }
@@ -306,6 +308,7 @@ function switchToJob(job) {
   completionBannerPrinted = false;
   sessionInfoPrinted = false;
   requestedSessionInfoPrinted = false;
+  resolvedSessionInfoPrinted = false;
   thinkingIndicatorPrinted = false;
   sessionRolloutPath = "";
   lastRolloutSearchAt = null;
@@ -342,12 +345,12 @@ function printSessionInfo(job) {
   }
 
   if (!job.threadId) {
-    printRequestedSessionInfo(job);
+    printFallbackSessionInfo(job);
     return;
   }
 
   if (!resolveSessionRolloutPath(job)) {
-    printRequestedSessionInfo(job);
+    printFallbackSessionInfo(job);
     return;
   }
 
@@ -374,7 +377,7 @@ function printSessionInfo(job) {
 
   const payload = turnContext && turnContext.payload;
   if (!payload || typeof payload.model !== "string" || !payload.model) {
-    printRequestedSessionInfo(job);
+    printFallbackSessionInfo(job);
     return;
   }
 
@@ -406,6 +409,47 @@ function printRequestedSessionInfo(job) {
   }
   console.log(color("dim", segments.join(" · ")));
   requestedSessionInfoPrinted = true;
+}
+
+function printFallbackSessionInfo(job) {
+  if (printResolvedSessionInfo(job)) {
+    return;
+  }
+  printRequestedSessionInfo(job);
+}
+
+function printResolvedSessionInfo(job) {
+  if (resolvedSessionInfoPrinted) {
+    return true;
+  }
+  const resolved = job.resolved;
+  if (!resolved || typeof resolved.model !== "string" || !resolved.model) {
+    return false;
+  }
+
+  const segments = ["model " + resolved.model];
+  if (typeof resolved.reasoningEffort === "string" && resolved.reasoningEffort) {
+    segments.push("effort " + resolved.reasoningEffort);
+  }
+  if (
+    resolved.sandbox &&
+    typeof resolved.sandbox === "object" &&
+    typeof resolved.sandbox.type === "string" &&
+    resolved.sandbox.type
+  ) {
+    segments.push("sandbox " + camelToKebab(resolved.sandbox.type));
+  }
+  console.log(color("dim", segments.join(" · ")));
+  resolvedSessionInfoPrinted = true;
+  return true;
+}
+
+function normalizeResolved(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
+function camelToKebab(value) {
+  return value.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
 }
 
 function resolveSessionRolloutPath(job) {
@@ -532,6 +576,7 @@ function checkJobCompletion() {
   currentJob.threadId = typeof meta.threadId === "string" ? meta.threadId : "";
   currentJob.startedAt = typeof meta.startedAt === "string" ? meta.startedAt : "";
   currentJob.request = meta.request && typeof meta.request === "object" ? meta.request : null;
+  currentJob.resolved = normalizeResolved(meta.resolved);
   printSessionInfo(currentJob);
   if (completionBannerPrinted) {
     return;

@@ -52,6 +52,9 @@ function createFakeJob(dataDir, options) {
   if (options.request && typeof options.request === "object") {
     job.request = options.request;
   }
+  if (options.resolved && typeof options.resolved === "object") {
+    job.resolved = options.resolved;
+  }
 
   fs.mkdirSync(jobsDir, { recursive: true });
   fs.writeFileSync(path.join(jobsDir, options.id + ".json"), JSON.stringify(job));
@@ -1664,6 +1667,143 @@ test("CLAUDE_PLUGIN_DATA overrides home plugin data root scanning", () => {
     assert.match(result.stdout, /job override-root-job \| status running/);
     assert.doesNotMatch(result.stdout, /home-root-job/);
   } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("once renders the resolved session line over the requested fallback", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "resolved-line-job",
+      threadId: "123e4567-e89b-12d3-a456-426614174777",
+      request: { model: "requested-model", effort: "medium" },
+      resolved: {
+        model: "gpt-5.6-sol",
+        modelProvider: "openai",
+        reasoningEffort: "xhigh",
+        sandbox: { type: "readOnly", networkAccess: false }
+      },
+      lines: [event("Starting Codex Task.")]
+    });
+
+    const result = runCodexWatch(["--once"], tempDir);
+
+    assert.strictEqual(result.status, 0);
+    assert.match(result.stdout, /^model gpt-5\.6-sol · effort xhigh · sandbox read-only$/m);
+    assert.doesNotMatch(result.stdout, /requested/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("once renders the resolved session line for jobs without a request key", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "review-resolved-job",
+      threadId: "123e4567-e89b-12d3-a456-426614174778",
+      resolved: {
+        model: "gpt-5.6-sol",
+        reasoningEffort: "medium",
+        sandbox: { type: "workspaceWrite" }
+      },
+      lines: [event("Starting Codex review.")]
+    });
+
+    const result = runCodexWatch(["--once"], tempDir);
+
+    assert.strictEqual(result.status, 0);
+    assert.match(result.stdout, /^model gpt-5\.6-sol · effort medium · sandbox workspace-write$/m);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("follow mode upgrades the requested line when resolved appears in the job JSON", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  let patchTimer = null;
+
+  try {
+    createFakeJob(tempDir, {
+      id: "resolved-upgrade-job",
+      threadId: "123e4567-e89b-12d3-a456-426614174779",
+      request: { model: "requested-model", effort: "medium" },
+      lines: [event("Starting Codex Task.")]
+    });
+
+    const stdoutPromise = runFollowMode([], tempDir, 1800);
+    patchTimer = setTimeout(() => {
+      const jsonPath = getFakeJobJsonPath(tempDir, "resolved-upgrade-job");
+      const meta = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
+      meta.resolved = {
+        model: "gpt-5.6-sol",
+        reasoningEffort: "xhigh",
+        sandbox: { type: "dangerFullAccess", networkAccess: false }
+      };
+      fs.writeFileSync(jsonPath, JSON.stringify(meta));
+    }, 600);
+
+    const stdout = await stdoutPromise;
+    const sessionInfoLines = stdout.split(/\r?\n/).filter((line) => line.startsWith("model "));
+
+    assert.deepStrictEqual(sessionInfoLines, [
+      "model requested-model (requested) · effort medium (requested)",
+      "model gpt-5.6-sol · effort xhigh · sandbox danger-full-access"
+    ]);
+  } finally {
+    clearTimeout(patchTimer);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("follow mode upgrades the resolved line when rollout session info appears", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const codexHome = path.join(tempDir, "codex-home");
+  const threadId = "123e4567-e89b-12d3-a456-426614174780";
+  let appendTimer = null;
+
+  try {
+    createFakeJob(tempDir, {
+      id: "rollout-upgrade-job",
+      threadId,
+      resolved: {
+        model: "gpt-5.6-sol",
+        reasoningEffort: "xhigh",
+        sandbox: { type: "readOnly" }
+      },
+      lines: [event("Starting Codex Task.")]
+    });
+    const rolloutPath = createFakeRollout(codexHome, threadId, [
+      {
+        timestamp: "2026-07-09T14:23:00.000Z",
+        payload: { model: "stale-model", effort: "low" }
+      }
+    ]);
+
+    const stdoutPromise = runFollowMode([], tempDir, 1800, codexHome);
+    appendTimer = setTimeout(() => {
+      fs.appendFileSync(
+        rolloutPath,
+        JSON.stringify({
+          timestamp: "2026-07-09T14:24:01.000Z",
+          type: "turn_context",
+          payload: { model: "rollout-model", effort: "high", sandbox_policy: { type: "danger-full-access" } }
+        }) + "\n"
+      );
+    }, 600);
+
+    const stdout = await stdoutPromise;
+    const sessionInfoLines = stdout.split(/\r?\n/).filter((line) => line.startsWith("model "));
+
+    assert.deepStrictEqual(sessionInfoLines, [
+      "model gpt-5.6-sol · effort xhigh · sandbox read-only",
+      "model rollout-model · effort high · sandbox danger-full-access"
+    ]);
+  } finally {
+    clearTimeout(appendTimer);
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
