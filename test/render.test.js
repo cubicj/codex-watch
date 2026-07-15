@@ -103,18 +103,29 @@ function getFakeJobJsonPath(dataDir, id) {
   return getFakeJobLogPath(dataDir, id).replace(/\.log$/, ".json");
 }
 
-function runCodexWatch(args, dataDir, codexHome = path.join(dataDir, "codex-home")) {
+function buildRunEnv(dataDir, codexHome, envOverrides) {
+  const env = {
+    ...process.env,
+    CLAUDE_PLUGIN_DATA: dataDir,
+    CODEX_HOME: codexHome,
+    ...envOverrides
+  };
+  for (const key of Object.keys(env)) {
+    if (env[key] === null) {
+      delete env[key];
+    }
+  }
+  return env;
+}
+
+function runCodexWatch(args, dataDir, codexHome = path.join(dataDir, "codex-home"), envOverrides = {}) {
   const stdoutPath = path.join(dataDir, "stdout.txt");
   const stdoutFd = fs.openSync(stdoutPath, "w");
 
   try {
     const result = spawnSync(process.execPath, [bin, ...args], {
       encoding: "utf8",
-      env: {
-        ...process.env,
-        CLAUDE_PLUGIN_DATA: dataDir,
-        CODEX_HOME: codexHome
-      },
+      env: buildRunEnv(dataDir, codexHome, envOverrides),
       stdio: ["ignore", stdoutFd, "pipe"]
     });
 
@@ -127,7 +138,7 @@ function runCodexWatch(args, dataDir, codexHome = path.join(dataDir, "codex-home
   }
 }
 
-function runFollowMode(args, dataDir, durationMs, codexHome = path.join(dataDir, "codex-home")) {
+function runFollowMode(args, dataDir, durationMs, codexHome = path.join(dataDir, "codex-home"), envOverrides = {}) {
   const stdoutPath = path.join(dataDir, "stdout.txt");
   const stdoutFd = fs.openSync(stdoutPath, "w");
 
@@ -155,11 +166,7 @@ function runFollowMode(args, dataDir, durationMs, codexHome = path.join(dataDir,
 
     try {
       child = spawn(process.execPath, [bin, ...args], {
-        env: {
-          ...process.env,
-          CLAUDE_PLUGIN_DATA: dataDir,
-          CODEX_HOME: codexHome
-        },
+        env: buildRunEnv(dataDir, codexHome, envOverrides),
         stdio: ["ignore", stdoutFd, "pipe"]
       });
     } catch (error) {
@@ -1573,6 +1580,90 @@ test("pinned follow mode exits 0 when the job record disappears", async () => {
     assert.match(result.stdout, /job record pin-pruned-job is gone — stopping\./);
   } finally {
     clearTimeout(deleteTimer);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("discovers jobs under any plugin data root when CLAUDE_PLUGIN_DATA is unset", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const homeDir = path.join(tempDir, "home");
+  const forkDataDir = path.join(homeDir, ".claude", "plugins", "data", "codex-codex-pretest");
+
+  try {
+    createFakeJob(forkDataDir, {
+      id: "fork-root-job",
+      lines: [event("Starting Codex Task.")]
+    });
+
+    const result = runCodexWatch(["--once"], tempDir, undefined, {
+      CLAUDE_PLUGIN_DATA: null,
+      HOME: homeDir
+    });
+
+    assert.strictEqual(result.status, 0);
+    assert.match(result.stdout, /job fork-root-job \| status running/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("picks the newest job across multiple plugin data roots", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const homeDir = path.join(tempDir, "home");
+  const stockDataDir = path.join(homeDir, ".claude", "plugins", "data", "codex-openai-codex");
+  const forkDataDir = path.join(homeDir, ".claude", "plugins", "data", "codex-codex-pretest");
+
+  try {
+    createFakeJob(stockDataDir, {
+      id: "older-root-job",
+      createdAt: "2026-07-09T14:00:00.000Z",
+      lines: [event("Starting Codex Task.")]
+    });
+    createFakeJob(forkDataDir, {
+      id: "newer-root-job",
+      createdAt: "2026-07-09T15:00:00.000Z",
+      lines: [event("Starting Codex Task.")]
+    });
+
+    const result = runCodexWatch(["--once"], tempDir, undefined, {
+      CLAUDE_PLUGIN_DATA: null,
+      HOME: homeDir
+    });
+
+    assert.strictEqual(result.status, 0);
+    assert.match(result.stdout, /job newer-root-job \| status running/);
+    assert.doesNotMatch(result.stdout, /older-root-job/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("CLAUDE_PLUGIN_DATA overrides home plugin data root scanning", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const homeDir = path.join(tempDir, "home");
+  const overrideDataDir = path.join(tempDir, "override-data");
+  const forkDataDir = path.join(homeDir, ".claude", "plugins", "data", "codex-codex-pretest");
+
+  try {
+    createFakeJob(forkDataDir, {
+      id: "home-root-job",
+      createdAt: "2026-07-09T15:00:00.000Z",
+      lines: [event("Starting Codex Task.")]
+    });
+    createFakeJob(overrideDataDir, {
+      id: "override-root-job",
+      createdAt: "2026-07-09T14:00:00.000Z",
+      lines: [event("Starting Codex Task.")]
+    });
+
+    const result = runCodexWatch(["--once"], overrideDataDir, undefined, {
+      HOME: homeDir
+    });
+
+    assert.strictEqual(result.status, 0);
+    assert.match(result.stdout, /job override-root-job \| status running/);
+    assert.doesNotMatch(result.stdout, /home-root-job/);
+  } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });

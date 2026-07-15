@@ -77,9 +77,7 @@ if (list && (once || pinnedJobId)) {
 const repoRoot = resolveRepoRoot();
 const slug = makeSlug(repoRoot);
 const stateDirName = makeStateDirName(repoRoot, slug);
-const stateRoot = process.env.CLAUDE_PLUGIN_DATA
-  ? path.join(process.env.CLAUDE_PLUGIN_DATA, "state")
-  : path.join(os.homedir(), ".claude/plugins/data/codex-openai-codex/state");
+const stateRoots = resolveStateRoots();
 const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 
 let currentJob = null;
@@ -143,6 +141,20 @@ function resolveRepoRoot() {
   }
 }
 
+function resolveStateRoots() {
+  if (process.env.CLAUDE_PLUGIN_DATA) {
+    return [path.join(process.env.CLAUDE_PLUGIN_DATA, "state")];
+  }
+  const dataRoot = path.join(os.homedir(), ".claude/plugins/data");
+  const roots = [];
+  for (const entry of safeReadDir(dataRoot, { withFileTypes: true })) {
+    if (entry.isDirectory() || entry.isSymbolicLink()) {
+      roots.push(path.join(dataRoot, entry.name, "state"));
+    }
+  }
+  return roots;
+}
+
 function makeSlug(root) {
   return path.basename(root).replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
 }
@@ -181,39 +193,42 @@ function readJson(file) {
 }
 
 function collectJobs() {
-  const jobsDir = path.join(stateRoot, stateDirName, "jobs");
-  const jobEntries = safeReadDir(jobsDir, { withFileTypes: true });
   const candidates = [];
 
-  for (const jobEntry of jobEntries) {
-    if (!jobEntry.isFile() || !jobEntry.name.endsWith(".json")) {
-      continue;
+  for (const stateRoot of stateRoots) {
+    const jobsDir = path.join(stateRoot, stateDirName, "jobs");
+    const jobEntries = safeReadDir(jobsDir, { withFileTypes: true });
+
+    for (const jobEntry of jobEntries) {
+      if (!jobEntry.isFile() || !jobEntry.name.endsWith(".json")) {
+        continue;
+      }
+
+      const id = path.basename(jobEntry.name, ".json");
+      const jsonPath = path.join(jobsDir, jobEntry.name);
+      const logPath = path.join(jobsDir, id + ".log");
+      const meta = readJson(jsonPath);
+      const stat = safeStat(jsonPath);
+      const fallbackCreatedAt = stat ? stat.mtime.toISOString() : "";
+      const createdAt = typeof meta.createdAt === "string" && meta.createdAt ? meta.createdAt : fallbackCreatedAt;
+
+      candidates.push({
+        id,
+        jsonPath,
+        logPath,
+        createdAt,
+        displayedCreatedAt: typeof meta.createdAt === "string" && meta.createdAt ? meta.createdAt : createdAt,
+        startedAt: typeof meta.startedAt === "string" ? meta.startedAt : "",
+        updatedAt: typeof meta.updatedAt === "string" ? meta.updatedAt : "",
+        completedAt: typeof meta.completedAt === "string" ? meta.completedAt : "",
+        status: typeof meta.status === "string" ? meta.status : "unknown",
+        phase: typeof meta.phase === "string" ? meta.phase : "unknown",
+        summary: typeof meta.summary === "string" ? meta.summary : "",
+        threadId: typeof meta.threadId === "string" ? meta.threadId : "",
+        write: typeof meta.write === "boolean" ? meta.write : false,
+        request: meta.request && typeof meta.request === "object" ? meta.request : null
+      });
     }
-
-    const id = path.basename(jobEntry.name, ".json");
-    const jsonPath = path.join(jobsDir, jobEntry.name);
-    const logPath = path.join(jobsDir, id + ".log");
-    const meta = readJson(jsonPath);
-    const stat = safeStat(jsonPath);
-    const fallbackCreatedAt = stat ? stat.mtime.toISOString() : "";
-    const createdAt = typeof meta.createdAt === "string" && meta.createdAt ? meta.createdAt : fallbackCreatedAt;
-
-    candidates.push({
-      id,
-      jsonPath,
-      logPath,
-      createdAt,
-      displayedCreatedAt: typeof meta.createdAt === "string" && meta.createdAt ? meta.createdAt : createdAt,
-      startedAt: typeof meta.startedAt === "string" ? meta.startedAt : "",
-      updatedAt: typeof meta.updatedAt === "string" ? meta.updatedAt : "",
-      completedAt: typeof meta.completedAt === "string" ? meta.completedAt : "",
-      status: typeof meta.status === "string" ? meta.status : "unknown",
-      phase: typeof meta.phase === "string" ? meta.phase : "unknown",
-      summary: typeof meta.summary === "string" ? meta.summary : "",
-      threadId: typeof meta.threadId === "string" ? meta.threadId : "",
-      write: typeof meta.write === "boolean" ? meta.write : false,
-      request: meta.request && typeof meta.request === "object" ? meta.request : null
-    });
   }
 
   candidates.sort((a, b) => {
