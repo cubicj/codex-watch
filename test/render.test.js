@@ -1807,3 +1807,46 @@ test("follow mode upgrades the resolved line when rollout session info appears",
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test("follow mode does not repeat the session line when rollout info matches the resolved line", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const codexHome = path.join(tempDir, "codex-home");
+  const threadId = "123e4567-e89b-12d3-a456-426614174781";
+  let appendTimer = null;
+
+  try {
+    createFakeJob(tempDir, {
+      id: "rollout-duplicate-job",
+      threadId,
+      resolved: {
+        model: "gpt-5.6-sol",
+        reasoningEffort: "xhigh",
+        sandbox: { type: "dangerFullAccess", networkAccess: false }
+      },
+      lines: [event("Starting Codex Task.")]
+    });
+    const rolloutPath = createFakeRollout(codexHome, threadId, []);
+
+    const stdoutPromise = runFollowMode([], tempDir, 1800, codexHome);
+    appendTimer = setTimeout(() => {
+      fs.appendFileSync(
+        rolloutPath,
+        JSON.stringify({
+          timestamp: "2026-07-09T14:24:01.000Z",
+          type: "turn_context",
+          payload: { model: "gpt-5.6-sol", effort: "xhigh", sandbox_policy: { type: "danger-full-access" } }
+        }) + "\n"
+      );
+    }, 600);
+
+    const stdout = await stdoutPromise;
+    const sessionInfoLines = stdout.split(/\r?\n/).filter((line) => line.startsWith("model "));
+
+    assert.deepStrictEqual(sessionInfoLines, [
+      "model gpt-5.6-sol · effort xhigh · sandbox danger-full-access"
+    ]);
+  } finally {
+    clearTimeout(appendTimer);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});

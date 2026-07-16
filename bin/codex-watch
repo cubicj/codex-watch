@@ -92,6 +92,7 @@ let completionBannerPrinted = false;
 let sessionInfoPrinted = false;
 let requestedSessionInfoPrinted = false;
 let resolvedSessionInfoPrinted = false;
+let lastSessionInfoLine = "";
 let thinkingIndicatorPrinted = false;
 let sessionRolloutPath = "";
 let lastRolloutSearchAt = null;
@@ -309,6 +310,7 @@ function switchToJob(job) {
   sessionInfoPrinted = false;
   requestedSessionInfoPrinted = false;
   resolvedSessionInfoPrinted = false;
+  lastSessionInfoLine = "";
   thinkingIndicatorPrinted = false;
   sessionRolloutPath = "";
   lastRolloutSearchAt = null;
@@ -388,8 +390,16 @@ function printSessionInfo(job) {
   if (payload.sandbox_policy && typeof payload.sandbox_policy.type === "string" && payload.sandbox_policy.type) {
     segments.push("sandbox " + payload.sandbox_policy.type);
   }
-  console.log(color("dim", segments.join(" · ")));
+  printSessionInfoLine(segments.join(" · "));
   sessionInfoPrinted = true;
+}
+
+function printSessionInfoLine(line) {
+  if (line === lastSessionInfoLine) {
+    return;
+  }
+  console.log(color("dim", line));
+  lastSessionInfoLine = line;
 }
 
 function printRequestedSessionInfo(job) {
@@ -407,7 +417,7 @@ function printRequestedSessionInfo(job) {
   if (typeof request.effort === "string" && request.effort) {
     segments.push("effort " + request.effort + " (requested)");
   }
-  console.log(color("dim", segments.join(" · ")));
+  printSessionInfoLine(segments.join(" · "));
   requestedSessionInfoPrinted = true;
 }
 
@@ -439,7 +449,7 @@ function printResolvedSessionInfo(job) {
   ) {
     segments.push("sandbox " + camelToKebab(resolved.sandbox.type));
   }
-  console.log(color("dim", segments.join(" · ")));
+  printSessionInfoLine(segments.join(" · "));
   resolvedSessionInfoPrinted = true;
   return true;
 }
