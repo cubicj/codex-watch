@@ -46,6 +46,9 @@ function createFakeJob(dataDir, options) {
   if (typeof options.threadId === "string") {
     job.threadId = options.threadId;
   }
+  if (typeof options.pid === "number") {
+    job.pid = options.pid;
+  }
   if (typeof options.write === "boolean") {
     job.write = options.write;
   }
@@ -212,6 +215,22 @@ function runFollowUntilExit(args, dataDir, codexHome = path.join(dataDir, "codex
       clearTimeout(hardKillTimer);
       fs.closeSync(stdoutFd);
       resolve({ code, signal, stderr, stdout: fs.readFileSync(stdoutPath, "utf8") });
+    });
+  });
+}
+
+function getExitedChildPid() {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["-e", ""]);
+    const pid = child.pid;
+
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code === 0) {
+        resolve(pid);
+        return;
+      }
+      reject(new Error("child exited with status " + code));
     });
   });
 }
@@ -1808,16 +1827,51 @@ test("follow mode upgrades the resolved line when rollout session info appears",
   }
 });
 
-test("follow mode does not repeat the session line when rollout info matches the resolved line", async () => {
+test("follow mode prints a thread id once when it appears in the job record", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const threadId = "123e4567-e89b-12d3-a456-426614174782";
+  let patchTimer = null;
+
+  try {
+    createFakeJob(tempDir, {
+      id: "late-thread-job",
+      threadId: "",
+      request: { model: "requested-model", effort: "medium" },
+      lines: [event("Starting Codex Task.")]
+    });
+
+    const stdoutPromise = runFollowMode([], tempDir, 1800);
+    patchTimer = setTimeout(() => {
+      const jsonPath = getFakeJobJsonPath(tempDir, "late-thread-job");
+      const meta = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
+      meta.threadId = threadId;
+      fs.writeFileSync(jsonPath, JSON.stringify(meta));
+    }, 600);
+
+    const stdout = await stdoutPromise;
+    const threadLines = stdout.split(/\r?\n/).filter((line) => line.startsWith("thread "));
+    const sessionInfoLines = stdout.split(/\r?\n/).filter((line) => line.startsWith("model "));
+
+    assert.deepStrictEqual(threadLines, ["thread " + threadId]);
+    assert.deepStrictEqual(sessionInfoLines, [
+      "model requested-model (requested) · effort medium (requested)"
+    ]);
+  } finally {
+    clearTimeout(patchTimer);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("a thread line between matching session tiers does not break session-line dedup", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
   const codexHome = path.join(tempDir, "codex-home");
   const threadId = "123e4567-e89b-12d3-a456-426614174781";
-  let appendTimer = null;
+  let patchTimer = null;
 
   try {
     createFakeJob(tempDir, {
       id: "rollout-duplicate-job",
-      threadId,
+      threadId: "",
       resolved: {
         model: "gpt-5.6-sol",
         reasoningEffort: "xhigh",
@@ -1825,28 +1879,104 @@ test("follow mode does not repeat the session line when rollout info matches the
       },
       lines: [event("Starting Codex Task.")]
     });
-    const rolloutPath = createFakeRollout(codexHome, threadId, []);
+    createFakeRollout(codexHome, threadId, [
+      {
+        timestamp: "2026-07-09T14:24:01.000Z",
+        payload: { model: "gpt-5.6-sol", effort: "xhigh", sandbox_policy: { type: "danger-full-access" } }
+      }
+    ]);
 
     const stdoutPromise = runFollowMode([], tempDir, 1800, codexHome);
-    appendTimer = setTimeout(() => {
-      fs.appendFileSync(
-        rolloutPath,
-        JSON.stringify({
-          timestamp: "2026-07-09T14:24:01.000Z",
-          type: "turn_context",
-          payload: { model: "gpt-5.6-sol", effort: "xhigh", sandbox_policy: { type: "danger-full-access" } }
-        }) + "\n"
-      );
+    patchTimer = setTimeout(() => {
+      const jsonPath = getFakeJobJsonPath(tempDir, "rollout-duplicate-job");
+      const meta = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
+      meta.threadId = threadId;
+      fs.writeFileSync(jsonPath, JSON.stringify(meta));
     }, 600);
 
     const stdout = await stdoutPromise;
     const sessionInfoLines = stdout.split(/\r?\n/).filter((line) => line.startsWith("model "));
+    const threadLines = stdout.split(/\r?\n/).filter((line) => line.startsWith("thread "));
 
     assert.deepStrictEqual(sessionInfoLines, [
       "model gpt-5.6-sol · effort xhigh · sandbox danger-full-access"
     ]);
+    assert.deepStrictEqual(threadLines, ["thread " + threadId]);
   } finally {
-    clearTimeout(appendTimer);
+    clearTimeout(patchTimer);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("once warns once when a queued worker pid is gone", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const deadPid = await getExitedChildPid();
+
+  try {
+    createFakeJob(tempDir, {
+      id: "dead-once-job",
+      status: "queued",
+      pid: deadPid,
+      lines: [event("Starting Codex Task.")]
+    });
+
+    const result = runCodexWatch(["--once"], tempDir);
+    const warningLines = result.stdout.split(/\r?\n/).filter((line) => line.startsWith("⚠ worker pid "));
+
+    assert.strictEqual(result.status, 0);
+    assert.deepStrictEqual(warningLines, ["⚠ worker pid " + deadPid + " is gone — job record is stale"]);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("once does not warn when a running worker pid is alive", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "alive-once-job",
+      status: "running",
+      pid: process.pid,
+      lines: [event("Starting Codex Task.")]
+    });
+
+    const result = runCodexWatch(["--once"], tempDir);
+
+    assert.strictEqual(result.status, 0);
+    assert.doesNotMatch(result.stdout, /job record is stale/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("follow mode warns once when a refreshed worker pid is gone", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const deadPid = await getExitedChildPid();
+  let patchTimer = null;
+
+  try {
+    createFakeJob(tempDir, {
+      id: "dead-follow-job",
+      status: "running",
+      pid: process.pid,
+      lines: [event("Starting Codex Task.")]
+    });
+
+    const stdoutPromise = runFollowMode([], tempDir, 1800);
+    patchTimer = setTimeout(() => {
+      const jsonPath = getFakeJobJsonPath(tempDir, "dead-follow-job");
+      const meta = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
+      meta.pid = deadPid;
+      fs.writeFileSync(jsonPath, JSON.stringify(meta));
+    }, 600);
+
+    const stdout = await stdoutPromise;
+    const warningLines = stdout.split(/\r?\n/).filter((line) => line.startsWith("⚠ worker pid "));
+
+    assert.deepStrictEqual(warningLines, ["⚠ worker pid " + deadPid + " is gone — job record is stale"]);
+  } finally {
+    clearTimeout(patchTimer);
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });

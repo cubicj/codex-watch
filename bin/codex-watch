@@ -93,6 +93,8 @@ let sessionInfoPrinted = false;
 let requestedSessionInfoPrinted = false;
 let resolvedSessionInfoPrinted = false;
 let lastSessionInfoLine = "";
+let threadIdPrinted = false;
+let staleWorkerWarningPrinted = false;
 let thinkingIndicatorPrinted = false;
 let sessionRolloutPath = "";
 let lastRolloutSearchAt = null;
@@ -116,6 +118,8 @@ if (once) {
   }
   printHeader(job);
   printSessionInfo(job);
+  printThreadId(job);
+  printStaleWorkerWarning(job);
   renderWholeLog(job);
   if (isTerminalStatus(job.status)) {
     printCompletionBanner(job, job.displayedCreatedAt);
@@ -227,6 +231,7 @@ function collectJobs() {
         phase: typeof meta.phase === "string" ? meta.phase : "unknown",
         summary: typeof meta.summary === "string" ? meta.summary : "",
         threadId: typeof meta.threadId === "string" ? meta.threadId : "",
+        pid: normalizePid(meta.pid),
         request: meta.request && typeof meta.request === "object" ? meta.request : null,
         resolved: normalizeResolved(meta.resolved)
       });
@@ -311,6 +316,8 @@ function switchToJob(job) {
   requestedSessionInfoPrinted = false;
   resolvedSessionInfoPrinted = false;
   lastSessionInfoLine = "";
+  threadIdPrinted = false;
+  staleWorkerWarningPrinted = false;
   thinkingIndicatorPrinted = false;
   sessionRolloutPath = "";
   lastRolloutSearchAt = null;
@@ -320,6 +327,8 @@ function switchToJob(job) {
   }
   printHeader(job);
   printSessionInfo(job);
+  printThreadId(job);
+  printStaleWorkerWarning(job);
   readAvailableLog();
   tailTimer = setInterval(readAvailableLog, 400);
 }
@@ -402,6 +411,14 @@ function printSessionInfoLine(line) {
   lastSessionInfoLine = line;
 }
 
+function printThreadId(job) {
+  if (threadIdPrinted || !job.threadId) {
+    return;
+  }
+  console.log(color("dim", "thread " + job.threadId));
+  threadIdPrinted = true;
+}
+
 function printRequestedSessionInfo(job) {
   const request = job.request;
   if (
@@ -456,6 +473,33 @@ function printResolvedSessionInfo(job) {
 
 function normalizeResolved(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
+function normalizePid(value) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function printStaleWorkerWarning(job) {
+  if (
+    staleWorkerWarningPrinted ||
+    (job.status !== "queued" && job.status !== "running") ||
+    !Number.isFinite(job.pid) ||
+    job.pid <= 0 ||
+    isProcessAlive(job.pid)
+  ) {
+    return;
+  }
+  console.log(color("red", "⚠ worker pid " + job.pid + " is gone — job record is stale"));
+  staleWorkerWarningPrinted = true;
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !error || error.code !== "ESRCH";
+  }
 }
 
 function camelToKebab(value) {
@@ -583,11 +627,15 @@ function checkJobCompletion() {
   }
 
   const status = typeof meta.status === "string" ? meta.status : "unknown";
+  currentJob.status = status;
   currentJob.threadId = typeof meta.threadId === "string" ? meta.threadId : "";
+  currentJob.pid = normalizePid(meta.pid);
   currentJob.startedAt = typeof meta.startedAt === "string" ? meta.startedAt : "";
   currentJob.request = meta.request && typeof meta.request === "object" ? meta.request : null;
   currentJob.resolved = normalizeResolved(meta.resolved);
+  printThreadId(currentJob);
   printSessionInfo(currentJob);
+  printStaleWorkerWarning(currentJob);
   if (completionBannerPrinted) {
     return;
   }
