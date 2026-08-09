@@ -55,3 +55,58 @@ test("once with no jobs exits 0", () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test("help lists the job and list flags", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    const result = runCodexWatch(["--help"], tempDir);
+
+    assert.strictEqual(result.status, 0);
+    assert.match(result.stdout, /--job <id>/);
+    assert.match(result.stdout, /--list/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("list combined with once exits 1 with usage", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    const result = runCodexWatch(["--list", "--once"], tempDir);
+
+    assert.strictEqual(result.status, 1);
+    assert.match(result.stdout, /Usage/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("list combined with job exits 1 with usage", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    const result = runCodexWatch(["--list", "--job", "some-id"], tempDir);
+
+    assert.strictEqual(result.status, 1);
+    assert.match(result.stdout, /Usage/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("job flag without a value exits 1 with usage", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    for (const invocation of [["--job"], ["--job", "--once"]]) {
+      const result = runCodexWatch(invocation, tempDir);
+
+      assert.strictEqual(result.status, 1);
+      assert.match(result.stdout, /Usage/);
+    }
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});

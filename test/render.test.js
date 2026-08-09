@@ -173,6 +173,39 @@ function runFollowMode(args, dataDir, durationMs, codexHome = path.join(dataDir,
   });
 }
 
+function runFollowUntilExit(args, dataDir, codexHome = path.join(dataDir, "codex-home")) {
+  const stdoutPath = path.join(dataDir, "stdout.txt");
+  const stdoutFd = fs.openSync(stdoutPath, "w");
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [bin, ...args], {
+      env: {
+        ...process.env,
+        CLAUDE_PLUGIN_DATA: dataDir,
+        CODEX_HOME: codexHome
+      },
+      stdio: ["ignore", stdoutFd, "pipe"]
+    });
+    const hardKillTimer = setTimeout(() => child.kill("SIGKILL"), 8000);
+    let stderr = "";
+
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.once("error", (error) => {
+      clearTimeout(hardKillTimer);
+      fs.closeSync(stdoutFd);
+      reject(error);
+    });
+    child.once("close", (code, signal) => {
+      clearTimeout(hardKillTimer);
+      fs.closeSync(stdoutFd);
+      resolve({ code, signal, stderr, stdout: fs.readFileSync(stdoutPath, "utf8") });
+    });
+  });
+}
+
 test("header contains the job id and status", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
 
@@ -1223,6 +1256,300 @@ test("closed stdout pipe exits cleanly", async () => {
     if (child && child.exitCode === null && child.signalCode === null) {
       child.kill("SIGKILL");
     }
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("list prints jobs newest first with a marker on the newest", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "list-old-job",
+      createdAt: "2026-07-09T14:23:50.000Z",
+      completedAt: "2026-07-09T14:23:58.000Z",
+      status: "completed",
+      phase: "completed",
+      summary: "Old job summary.",
+      lines: [event("Turn completed.")]
+    });
+    createFakeJob(tempDir, {
+      id: "list-new-job",
+      createdAt: "2026-07-09T14:25:00.000Z",
+      status: "running",
+      phase: "executing",
+      summary: "New job summary.",
+      lines: [event("Starting Codex Task.")]
+    });
+
+    const result = runCodexWatch(["--list"], tempDir);
+    const outputLines = result.stdout.split(/\r?\n/).filter((line) => line.length > 0);
+
+    assert.strictEqual(result.status, 0);
+    assert.strictEqual(outputLines.length, 2);
+    assert.match(outputLines[0], /^\* list-new-job\s+running\s+started \d{2}:\d{2}:\d{2} \(.+\)  New job summary\.$/);
+    assert.match(outputLines[1], /^ {2}list-old-job\s+completed\s+started \d{2}:\d{2}:\d{2} \(8s\)  Old job summary\.$/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("list with no jobs prints the empty message and exits 0", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    const result = runCodexWatch(["--list"], tempDir);
+
+    assert.strictEqual(result.status, 0);
+    assert.match(result.stdout, /^No Codex job found for /m);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("list truncates long summaries", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "list-long-summary-job",
+      summary: "s".repeat(160),
+      lines: [event("Starting Codex Task.")]
+    });
+
+    const result = runCodexWatch(["--list"], tempDir);
+
+    assert.strictEqual(result.status, 0);
+    assert.match(result.stdout, /s{139}…$/m);
+    assert.doesNotMatch(result.stdout, /s{140}/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("list omits the summary column for jobs without a summary", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "list-no-summary-job",
+      lines: [event("Starting Codex Task.")]
+    });
+
+    const result = runCodexWatch(["--list"], tempDir);
+    const line = result.stdout.split(/\r?\n/).find((value) => value.includes("list-no-summary-job"));
+
+    assert.strictEqual(result.status, 0);
+    assert.ok(line);
+    assert.match(line, /\)$/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("once with an exact job id renders that job instead of the newest", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "pin-old-job",
+      createdAt: "2026-07-09T14:22:00.000Z",
+      lines: [event("Assistant message"), "Pinned old output."]
+    });
+    createFakeJob(tempDir, {
+      id: "pin-new-job",
+      createdAt: "2026-07-09T14:25:00.000Z",
+      lines: [event("Assistant message"), "Unpinned new output."]
+    });
+
+    const result = runCodexWatch(["--once", "--job", "pin-old-job"], tempDir);
+
+    assert.strictEqual(result.status, 0);
+    assert.match(result.stdout, /job pin-old-job \| status running/);
+    assert.match(result.stdout, /Pinned old output\./);
+    assert.doesNotMatch(result.stdout, /Unpinned new output\./);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("once with a unique job id prefix renders the matching job", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "prefix-target-job",
+      lines: [event("Assistant message"), "Prefix target output."]
+    });
+    createFakeJob(tempDir, {
+      id: "other-job",
+      lines: [event("Assistant message"), "Other output."]
+    });
+
+    const result = runCodexWatch(["--once", "--job", "prefix-t"], tempDir);
+
+    assert.strictEqual(result.status, 0);
+    assert.match(result.stdout, /job prefix-target-job \| status running/);
+    assert.match(result.stdout, /Prefix target output\./);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("once with an ambiguous job id prefix exits 1 listing candidates", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "amb-a-job",
+      lines: [event("Starting Codex Task.")]
+    });
+    createFakeJob(tempDir, {
+      id: "amb-b-job",
+      lines: [event("Starting Codex Task.")]
+    });
+
+    const result = runCodexWatch(["--once", "--job", "amb"], tempDir);
+
+    assert.strictEqual(result.status, 1);
+    assert.match(result.stderr, /job id "amb" is ambiguous:/);
+    assert.match(result.stderr, /amb-a-job/);
+    assert.match(result.stderr, /amb-b-job/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("once with an unknown job id exits 1", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "present-job",
+      lines: [event("Starting Codex Task.")]
+    });
+
+    const result = runCodexWatch(["--once", "--job", "absent-job"], tempDir);
+
+    assert.strictEqual(result.status, 1);
+    assert.match(result.stderr, /job "absent-job" not found in /);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("pinned follow mode ignores newer jobs", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "pin-follow-a-job",
+      createdAt: "2026-07-09T14:22:00.000Z",
+      lines: [event("Assistant message"), "Pinned follow output."]
+    });
+    createFakeJob(tempDir, {
+      id: "pin-follow-b-job",
+      createdAt: "2026-07-09T14:25:00.000Z",
+      lines: [event("Assistant message"), "Newer follow output."]
+    });
+
+    const stdout = await runFollowMode(["--job", "pin-follow-a-job"], tempDir, 1500);
+
+    assert.match(stdout, /job pin-follow-a-job \| status running/);
+    assert.match(stdout, /Pinned follow output\./);
+    assert.doesNotMatch(stdout, /switched to/);
+    assert.doesNotMatch(stdout, /Newer follow output\./);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("pinned follow mode exits 0 after the job completes", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  let rewriteTimer = null;
+
+  try {
+    const job = createFakeJob(tempDir, {
+      id: "pin-complete-job",
+      createdAt: "2026-07-09T14:23:50.000Z",
+      status: "running",
+      phase: "executing",
+      lines: [event("Starting Codex Task.")]
+    });
+
+    const exitPromise = runFollowUntilExit(["--job", "pin-complete-job"], tempDir);
+    rewriteTimer = setTimeout(() => {
+      fs.writeFileSync(
+        getFakeJobJsonPath(tempDir, job.id),
+        JSON.stringify({
+          ...job,
+          status: "completed",
+          phase: "completed",
+          completedAt: "2026-07-09T14:23:58.000Z"
+        })
+      );
+    }, 600);
+
+    const result = await exitPromise;
+
+    assert.strictEqual(result.code, 0);
+    assert.strictEqual(result.signal, null);
+    assert.match(result.stdout, /^✓ completed · 8s$/m);
+  } finally {
+    clearTimeout(rewriteTimer);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("pinned follow mode renders an already completed job and exits 0", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "pin-done-job",
+      createdAt: "2026-07-09T14:23:50.000Z",
+      completedAt: "2026-07-09T14:23:58.000Z",
+      status: "completed",
+      phase: "completed",
+      lines: [event("Assistant message"), "Already done body."]
+    });
+
+    const result = await runFollowUntilExit(["--job", "pin-done-job"], tempDir);
+
+    assert.strictEqual(result.code, 0);
+    assert.strictEqual(result.signal, null);
+    assert.match(result.stdout, /job pin-done-job \| status completed/);
+    assert.match(result.stdout, /Already done body\./);
+    assert.match(result.stdout, /^✓ completed · 8s$/m);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("pinned follow mode exits 0 when the job record disappears", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  let deleteTimer = null;
+
+  try {
+    createFakeJob(tempDir, {
+      id: "pin-pruned-job",
+      status: "running",
+      phase: "executing",
+      lines: [event("Starting Codex Task.")]
+    });
+
+    const exitPromise = runFollowUntilExit(["--job", "pin-pruned-job"], tempDir);
+    deleteTimer = setTimeout(() => {
+      fs.rmSync(getFakeJobJsonPath(tempDir, "pin-pruned-job"));
+    }, 600);
+
+    const result = await exitPromise;
+
+    assert.strictEqual(result.code, 0);
+    assert.strictEqual(result.signal, null);
+    assert.match(result.stdout, /job record pin-pruned-job is gone — stopping\./);
+  } finally {
+    clearTimeout(deleteTimer);
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });

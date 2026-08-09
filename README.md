@@ -17,6 +17,8 @@ Live-tail the newest Codex plugin background job log for the current git repo.
 - Lists each applied file with its change type and a workspace-relative path when available.
 - Prints a completion banner such as `✓ completed · <duration>` or `✗ <status> · <duration>`.
 - Drops duplicate captured lines.
+- Lists this repo's jobs with `--list` — newest first, with status, start time, duration, and summary.
+- Pins the tail to one job with `--job <id>` (unique prefixes allowed) and exits after that job's completion banner.
 
 ## Requirements
 
@@ -56,10 +58,12 @@ Run `codex-watch` from inside the git repo whose Codex job you want to watch.
 ```sh
 codex-watch
 codex-watch --once
+codex-watch --list
+codex-watch --job <id>
 codex-watch --help
 ```
 
-`codex-watch` starts in follow mode, tails the newest job, and keeps watching for newer jobs so a resumed Codex run switches automatically. `--once` renders the current newest job once and exits. `--help` prints usage.
+`codex-watch` starts in follow mode, tails the newest job, and keeps watching for newer jobs so a resumed Codex run switches automatically. `--once` renders the selected job once and exits. `--list` prints this repo's jobs, newest first, and exits. `--job <id>` pins the tail to one job (a unique id prefix works) and exits after its completion banner. `--help` prints usage.
 
 Colors are enabled only on TTY output. Set `NO_COLOR=1` or pipe output to disable color.
 

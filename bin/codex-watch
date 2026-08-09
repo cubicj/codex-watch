@@ -42,12 +42,14 @@ function assistantText(value) {
 }
 
 function printUsage() {
-  console.log("Usage: codex-watch [--once] [--help]");
+  console.log("Usage: codex-watch [--once] [--job <id>] [--list] [--help]");
   console.log("");
   console.log("Live-tail the newest Codex companion job log for the current git repo.");
   console.log("");
   console.log("Options:");
-  console.log("  --once   Render the current newest job once and exit");
+  console.log("  --once       Render the selected job once and exit");
+  console.log("  --job <id>   Tail the job with this id (unique prefix allowed) instead of the newest one");
+  console.log("  --list       List this repo's jobs, newest first, and exit");
   console.log("  -h, --help   Show this help");
 }
 
@@ -57,6 +59,21 @@ if (args.includes("--help") || args.includes("-h")) {
 }
 
 const once = args.includes("--once");
+const list = args.includes("--list");
+const jobFlagIndex = args.indexOf("--job");
+let pinnedJobId = "";
+if (jobFlagIndex !== -1) {
+  const value = args[jobFlagIndex + 1];
+  if (typeof value !== "string" || !value || value.startsWith("-")) {
+    printUsage();
+    process.exit(1);
+  }
+  pinnedJobId = value;
+}
+if (list && (once || pinnedJobId)) {
+  printUsage();
+  process.exit(1);
+}
 const repoRoot = resolveRepoRoot();
 const slug = makeSlug(repoRoot);
 const stateDirName = makeStateDirName(repoRoot, slug);
@@ -87,8 +104,12 @@ process.on("SIGINT", () => {
   process.exit(0);
 });
 
+if (list) {
+  runList();
+}
+
 if (once) {
-  const job = findNewestJob();
+  const job = pinnedJobId ? resolvePinnedJob() : findNewestJob();
   if (!job) {
     console.log("No Codex job found for " + slug + ".");
     process.exit(0);
@@ -102,7 +123,11 @@ if (once) {
   process.exit(0);
 }
 
-startFollow();
+if (pinnedJobId) {
+  switchToJob(resolvePinnedJob());
+} else {
+  startFollow();
+}
 
 function resolveRepoRoot() {
   try {
@@ -155,7 +180,7 @@ function readJson(file) {
   }
 }
 
-function findNewestJob() {
+function collectJobs() {
   const jobsDir = path.join(stateRoot, stateDirName, "jobs");
   const jobEntries = safeReadDir(jobsDir, { withFileTypes: true });
   const candidates = [];
@@ -198,7 +223,34 @@ function findNewestJob() {
     return a.createdAt < b.createdAt ? 1 : -1;
   });
 
-  return candidates[0] || null;
+  return candidates;
+}
+
+function findNewestJob() {
+  return collectJobs()[0] || null;
+}
+
+function resolvePinnedJob() {
+  const jobs = collectJobs();
+  const exact = jobs.find((job) => job.id === pinnedJobId);
+  if (exact) {
+    return exact;
+  }
+
+  const prefixed = jobs.filter((job) => job.id.startsWith(pinnedJobId));
+  if (prefixed.length === 1) {
+    return prefixed[0];
+  }
+  if (prefixed.length > 1) {
+    console.error('job id "' + pinnedJobId + '" is ambiguous:');
+    for (const job of prefixed) {
+      console.error("  " + job.id);
+    }
+    process.exit(1);
+  }
+
+  console.error('job "' + pinnedJobId + '" not found in ' + slug + ".");
+  process.exit(1);
 }
 
 function startFollow() {
@@ -453,6 +505,11 @@ function checkJobCompletion() {
   try {
     meta = JSON.parse(fs.readFileSync(currentJob.jsonPath, "utf8"));
   } catch (_error) {
+    if (pinnedJobId && !safeStat(currentJob.jsonPath)) {
+      console.log(color("dim", "job record " + currentJob.id + " is gone — stopping."));
+      clearTimers();
+      process.exit(0);
+    }
     return;
   }
 
@@ -471,6 +528,10 @@ function checkJobCompletion() {
 
   printCompletionBanner(meta, currentJob.displayedCreatedAt);
   completionBannerPrinted = true;
+  if (pinnedJobId) {
+    clearTimers();
+    process.exit(0);
+  }
 }
 
 function printCompletionBanner(job, fallbackCreatedAt) {
@@ -485,6 +546,52 @@ function printCompletionBanner(job, fallbackCreatedAt) {
   } else {
     console.log(color("red", "✗ " + status + " · " + elapsed));
   }
+}
+
+function runList() {
+  const jobs = collectJobs();
+  if (jobs.length === 0) {
+    console.log("No Codex job found for " + slug + ".");
+    process.exit(0);
+  }
+
+  const idWidth = Math.max(...jobs.map((job) => job.id.length));
+  const statusWidth = Math.max(...jobs.map((job) => job.status.length));
+
+  for (const [index, job] of jobs.entries()) {
+    const marker = index === 0 ? "*" : " ";
+    const startedAt = job.startedAt || job.displayedCreatedAt;
+    const endedAt = isTerminalStatus(job.status) ? (job.completedAt || job.updatedAt) : "";
+    const segments = [
+      marker + " " + job.id.padEnd(idWidth),
+      statusColor(job.status, job.status.padEnd(statusWidth)),
+      "started " + formatClock(job.displayedCreatedAt) + " (" + formatElapsed(startedAt, endedAt) + ")"
+    ];
+    if (job.summary) {
+      segments.push(truncate(job.summary));
+    }
+    console.log(segments.join("  ").trimEnd());
+  }
+  process.exit(0);
+}
+
+function statusColor(status, value) {
+  if (status === "completed") {
+    return color("green", value);
+  }
+  if (status === "running" || status === "queued") {
+    return value;
+  }
+  return color("red", value);
+}
+
+function formatClock(createdAt) {
+  const parsed = new Date(createdAt);
+  if (Number.isNaN(parsed.getTime())) {
+    return "unknown";
+  }
+  const pad = (value) => String(value).padStart(2, "0");
+  return pad(parsed.getHours()) + ":" + pad(parsed.getMinutes()) + ":" + pad(parsed.getSeconds());
 }
 
 function isTerminalStatus(status) {
