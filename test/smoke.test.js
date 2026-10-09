@@ -41,6 +41,7 @@ function runCodexWatch(args, claudePluginData) {
       encoding: "utf8",
       env: {
         ...process.env,
+        CODEX_COMPANION_PLUGIN_DATA: undefined,
         CLAUDE_PLUGIN_DATA: claudePluginData,
         CODEX_HOME: path.join(claudePluginData, "codex-home")
       },

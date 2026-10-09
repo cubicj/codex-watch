@@ -121,7 +121,7 @@ if (once) {
   printThreadId(job);
   printStaleWorkerWarning(job);
   renderWholeLog(job);
-  if (isTerminalStatus(job.status)) {
+  if (isTerminalStatus(job.status) || isWorkerGone(job)) {
     printCompletionBanner(job, job.displayedCreatedAt);
   }
   process.exit(0);
@@ -148,8 +148,9 @@ function resolveRepoRoot() {
 }
 
 function resolveStateRoots() {
-  if (process.env.CLAUDE_PLUGIN_DATA) {
-    return [path.join(process.env.CLAUDE_PLUGIN_DATA, "state")];
+  const pluginDataDir = process.env.CODEX_COMPANION_PLUGIN_DATA || process.env.CLAUDE_PLUGIN_DATA;
+  if (pluginDataDir) {
+    return [path.join(pluginDataDir, "state")];
   }
   const dataRoot = path.join(os.homedir(), ".claude/plugins/data");
   const roots = [];
@@ -346,8 +347,15 @@ function printHeader(job) {
   const startedAt = job.startedAt || job.displayedCreatedAt;
   const endedAt = isTerminalStatus(job.status) ? (job.completedAt || job.updatedAt) : "";
   const elapsed = formatElapsed(startedAt, endedAt);
-  const line = "job " + job.id + " | status " + job.status + " | phase " + job.phase + " | elapsed " + elapsed;
+  const title = getThreadTitle(job);
+  const line = "job " + job.id + " | status " + job.status + " | phase " + job.phase + " | elapsed " + elapsed +
+    (title ? " | " + truncate(title) : "");
   console.log(color("dim", line));
+}
+
+function getThreadTitle(job) {
+  const title = job.request && job.request.threadTitle;
+  return typeof title === "string" ? title.trim() || null : null;
 }
 
 function printSessionInfo(job) {
@@ -480,17 +488,16 @@ function normalizePid(value) {
 }
 
 function printStaleWorkerWarning(job) {
-  if (
-    staleWorkerWarningPrinted ||
-    (job.status !== "queued" && job.status !== "running") ||
-    !Number.isFinite(job.pid) ||
-    job.pid <= 0 ||
-    isProcessAlive(job.pid)
-  ) {
+  if (staleWorkerWarningPrinted || !isWorkerGone(job)) {
     return;
   }
   console.log(color("red", "⚠ worker pid " + job.pid + " is gone — job record is stale"));
   staleWorkerWarningPrinted = true;
+}
+
+function isWorkerGone(job) {
+  return (job.status === "queued" || job.status === "running") &&
+    Number.isFinite(job.pid) && job.pid > 0 && !isProcessAlive(job.pid);
 }
 
 function isProcessAlive(pid) {
@@ -639,7 +646,7 @@ function checkJobCompletion() {
   if (completionBannerPrinted) {
     return;
   }
-  if (!isTerminalStatus(status)) {
+  if (!isTerminalStatus(status) && !isWorkerGone(currentJob)) {
     return;
   }
 
@@ -655,6 +662,10 @@ function printCompletionBanner(job, fallbackCreatedAt) {
   const status = typeof job.status === "string" ? job.status : "unknown";
   const createdAt = typeof job.createdAt === "string" && job.createdAt ? job.createdAt : fallbackCreatedAt;
   const startedAt = typeof job.startedAt === "string" && job.startedAt ? job.startedAt : createdAt;
+  if (isWorkerGone(job)) {
+    console.log(color("red", "✗ failed (worker exited) · " + formatElapsed(startedAt)));
+    return;
+  }
   const updatedAt = typeof job.updatedAt === "string" && job.updatedAt ? job.updatedAt : "";
   const completedAt = typeof job.completedAt === "string" && job.completedAt ? job.completedAt : updatedAt;
   const elapsed = formatElapsed(startedAt, completedAt);
@@ -673,19 +684,22 @@ function runList() {
   }
 
   const idWidth = Math.max(...jobs.map((job) => job.id.length));
-  const statusWidth = Math.max(...jobs.map((job) => job.status.length));
+  const displayedStatuses = jobs.map((job) => isWorkerGone(job) ? "failed" : job.status);
+  const statusWidth = Math.max(...displayedStatuses.map((status) => status.length));
 
   for (const [index, job] of jobs.entries()) {
+    const status = displayedStatuses[index];
     const marker = index === 0 ? "*" : " ";
     const startedAt = job.startedAt || job.displayedCreatedAt;
     const endedAt = isTerminalStatus(job.status) ? (job.completedAt || job.updatedAt) : "";
     const segments = [
       marker + " " + job.id.padEnd(idWidth),
-      statusColor(job.status, job.status.padEnd(statusWidth)),
+      statusColor(status, status.padEnd(statusWidth)),
       "started " + formatClock(job.displayedCreatedAt) + " (" + formatElapsed(startedAt, endedAt) + ")"
     ];
-    if (job.summary) {
-      segments.push(truncate(job.summary));
+    const label = getThreadTitle(job) || job.summary;
+    if (label) {
+      segments.push(truncate(label));
     }
     console.log(segments.join("  ").trimEnd());
   }

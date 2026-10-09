@@ -112,6 +112,7 @@ function getFakeJobJsonPath(dataDir, id) {
 function buildRunEnv(dataDir, codexHome, envOverrides) {
   const env = {
     ...process.env,
+    CODEX_COMPANION_PLUGIN_DATA: null,
     CLAUDE_PLUGIN_DATA: dataDir,
     CODEX_HOME: codexHome,
     ...envOverrides
@@ -192,11 +193,7 @@ function runFollowUntilExit(args, dataDir, codexHome = path.join(dataDir, "codex
 
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [bin, ...args], {
-      env: {
-        ...process.env,
-        CLAUDE_PLUGIN_DATA: dataDir,
-        CODEX_HOME: codexHome
-      },
+      env: buildRunEnv(dataDir, codexHome),
       stdio: ["ignore", stdoutFd, "pipe"]
     });
     const hardKillTimer = setTimeout(() => child.kill("SIGKILL"), 8000);
@@ -221,7 +218,7 @@ function runFollowUntilExit(args, dataDir, codexHome = path.join(dataDir, "codex
 
 function getExitedChildPid() {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["-e", ""]);
+    const child = spawn(process.execPath, ["-e", ""], { env: buildRunEnv() });
     const pid = child.pid;
 
     child.once("error", reject);
@@ -1272,10 +1269,7 @@ test("closed stdout pipe exits cleanly", async () => {
 
     const logPath = getFakeJobLogPath(tempDir, id);
     child = spawn(process.execPath, [bin], {
-      env: {
-        ...process.env,
-        CLAUDE_PLUGIN_DATA: tempDir
-      },
+      env: buildRunEnv(tempDir, path.join(tempDir, "codex-home")),
       stdio: ["ignore", "pipe", "pipe"]
     });
 
@@ -1618,6 +1612,7 @@ test("discovers jobs under any plugin data root when CLAUDE_PLUGIN_DATA is unset
     });
 
     const result = runCodexWatch(["--once"], tempDir, undefined, {
+      CODEX_COMPANION_PLUGIN_DATA: null,
       CLAUDE_PLUGIN_DATA: null,
       HOME: homeDir
     });
@@ -1648,6 +1643,7 @@ test("picks the newest job across multiple plugin data roots", () => {
     });
 
     const result = runCodexWatch(["--once"], tempDir, undefined, {
+      CODEX_COMPANION_PLUGIN_DATA: null,
       CLAUDE_PLUGIN_DATA: null,
       HOME: homeDir
     });
@@ -1980,3 +1976,269 @@ test("follow mode warns once when a refreshed worker pid is gone", async () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test("CODEX_COMPANION_PLUGIN_DATA wins over conflicting CLAUDE_PLUGIN_DATA", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const companionDataDir = path.join(tempDir, "companion");
+
+  try {
+    createFakeJob(tempDir, { id: "legacy-root-job", lines: [] });
+    createFakeJob(companionDataDir, { id: "companion-root-job", lines: [] });
+
+    const result = runCodexWatch(["--once"], tempDir, undefined, {
+      CODEX_COMPANION_PLUGIN_DATA: companionDataDir
+    });
+
+    assert.strictEqual(result.status, 0);
+    assert.match(result.stdout, /job companion-root-job \| status running/);
+    assert.doesNotMatch(result.stdout, /legacy-root-job/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+for (const companionData of [null, ""]) {
+  test("CLAUDE_PLUGIN_DATA is used when CODEX_COMPANION_PLUGIN_DATA is " + (companionData === null ? "unset" : "empty"), () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+    try {
+      createFakeJob(tempDir, { id: "legacy-fallback-job", lines: [] });
+
+      const result = runCodexWatch(["--once"], tempDir, undefined, {
+        CODEX_COMPANION_PLUGIN_DATA: companionData
+      });
+
+      assert.strictEqual(result.status, 0);
+      assert.match(result.stdout, /job legacy-fallback-job \| status running/);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const status of ["queued", "running"]) {
+  test("once prints a failed banner after the log for a gone " + status + " worker", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+    const deadPid = await getExitedChildPid();
+
+    try {
+      createFakeJob(tempDir, {
+        id: "gone-banner-job",
+        status,
+        pid: deadPid,
+        createdAt: new Date(Date.now() - 120000).toISOString(),
+        startedAt: new Date(Date.now() - 10000).toISOString(),
+        lines: [event("Assistant message"), "Last worker output."]
+      });
+      const jsonPath = getFakeJobJsonPath(tempDir, "gone-banner-job");
+      const meta = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
+      meta.updatedAt = meta.startedAt;
+      if (status === "queued") {
+        delete meta.startedAt;
+      }
+      fs.writeFileSync(jsonPath, JSON.stringify(meta));
+      const originalRecord = fs.readFileSync(jsonPath, "utf8");
+
+      const result = runCodexWatch(["--once"], tempDir);
+
+      assert.strictEqual(result.status, 0);
+      assert.ok(result.stdout.includes("job gone-banner-job | status " + status));
+      assert.match(result.stdout, /Last worker output\.[\s\S]*✗ failed \(worker exited\) · /);
+      assert.match(result.stdout, status === "queued"
+        ? /^✗ failed \(worker exited\) · 2m [0-4]s$/m
+        : /^✗ failed \(worker exited\) · 1[0-4]s$/m);
+      assert.strictEqual(fs.readFileSync(jsonPath, "utf8"), originalRecord);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+}
+
+test("list displays failed with aligned columns for gone workers", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const deadPid = await getExitedChildPid();
+
+  try {
+    for (const [id, status] of [["gone-queued", "queued"], ["gone-running", "running"]]) {
+      createFakeJob(tempDir, {
+        id,
+        status,
+        pid: deadPid,
+        createdAt: new Date(Date.now() - 10000).toISOString(),
+        lines: []
+      });
+    }
+
+    const result = runCodexWatch(["--list"], tempDir);
+    const rows = result.stdout.trimEnd().split(/\r?\n/);
+
+    assert.strictEqual(result.status, 0);
+    assert.strictEqual(rows.length, 2);
+    for (const row of rows) {
+      assert.match(row, /^. gone-(?:queued |running)  failed  started .* \(1[0-4]s\)$/);
+    }
+    assert.match(rows[0], /^\* gone-running/);
+    assert.match(rows[1], /^  gone-queued/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("pinned follow exits 0 when a refreshed worker is gone", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const deadPid = await getExitedChildPid();
+  let patchTimer = null;
+
+  try {
+    createFakeJob(tempDir, {
+      id: "gone-pinned-job",
+      pid: process.pid,
+      lines: [event("Starting Codex Task.")]
+    });
+
+    const exitPromise = runFollowUntilExit(["--job", "gone-pinned-job"], tempDir);
+    patchTimer = setTimeout(() => {
+      fs.appendFileSync(getFakeJobLogPath(tempDir, "gone-pinned-job"), event("Assistant message") + "\nOutput before worker exit.\n");
+      const jsonPath = getFakeJobJsonPath(tempDir, "gone-pinned-job");
+      const meta = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
+      meta.pid = deadPid;
+      fs.writeFileSync(jsonPath, JSON.stringify(meta));
+    }, 600);
+
+    const result = await exitPromise;
+
+    assert.strictEqual(result.code, 0);
+    assert.strictEqual(result.signal, null);
+    assert.match(result.stdout, /Output before worker exit\.[\s\S]*✗ failed \(worker exited\) · /);
+    assert.strictEqual((result.stdout.match(/✗ failed \(worker exited\)/g) || []).length, 1);
+  } finally {
+    clearTimeout(patchTimer);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("gone-worker follow prints one banner through terminal refresh and switches to a newer job", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+  const deadPid = await getExitedChildPid();
+  let terminalTimer = null;
+  let newerTimer = null;
+
+  try {
+    createFakeJob(tempDir, {
+      id: "gone-unpinned-job",
+      pid: deadPid,
+      lines: []
+    });
+
+    const stdoutPromise = runFollowMode([], tempDir, 2600);
+    terminalTimer = setTimeout(() => {
+      const jsonPath = getFakeJobJsonPath(tempDir, "gone-unpinned-job");
+      const meta = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
+      meta.status = "failed";
+      meta.pid = null;
+      meta.completedAt = new Date().toISOString();
+      fs.writeFileSync(jsonPath, JSON.stringify(meta));
+    }, 600);
+    newerTimer = setTimeout(() => {
+      createFakeJob(tempDir, {
+        id: "newer-live-job",
+        createdAt: new Date().toISOString(),
+        pid: process.pid,
+        lines: []
+      });
+    }, 1400);
+
+    const stdout = await stdoutPromise;
+
+    assert.strictEqual((stdout.match(/^✗ /gm) || []).length, 1);
+    assert.match(stdout, /^✗ failed \(worker exited\) · /m);
+    assert.strictEqual((stdout.match(/job record is stale/g) || []).length, 1);
+    assert.match(stdout, /job newer-live-job \| status running/);
+  } finally {
+    clearTimeout(terminalTimer);
+    clearTimeout(newerTimer);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("a live running worker keeps its list status and has no completion banner", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "live-worker-job",
+      pid: process.pid,
+      lines: []
+    });
+
+    const onceResult = runCodexWatch(["--once"], tempDir);
+    const listResult = runCodexWatch(["--list"], tempDir);
+
+    assert.strictEqual(onceResult.status, 0);
+    assert.strictEqual(listResult.status, 0);
+    assert.match(onceResult.stdout, /job live-worker-job \| status running/);
+    assert.doesNotMatch(onceResult.stdout, /worker exited|job record is stale|^[✓✗]/m);
+    assert.match(listResult.stdout, /^\* live-worker-job  running  started /);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+for (const [name, request, expected] of [
+  ["trimmed thread title", { threadTitle: "  Repair worker lifecycle  " }, "Repair worker lifecycle"],
+  ["absent thread title", undefined, "[Claude-Orchestrated Task] prompt excerpt"],
+  ["null thread title", { threadTitle: null }, "[Claude-Orchestrated Task] prompt excerpt"],
+  ["whitespace-only thread title", { threadTitle: " \t " }, "[Claude-Orchestrated Task] prompt excerpt"],
+  ["non-string thread title", { threadTitle: 123 }, "[Claude-Orchestrated Task] prompt excerpt"],
+  ["long thread title", { threadTitle: "x".repeat(138) + "😀" + "y".repeat(20) }, "x".repeat(138) + "😀…"]
+]) {
+  test("list label uses " + name, () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+    try {
+      createFakeJob(tempDir, {
+        id: "title-list-job",
+        status: "completed",
+        request,
+        summary: "[Claude-Orchestrated Task] prompt excerpt",
+        lines: []
+      });
+
+      const result = runCodexWatch(["--list"], tempDir);
+      const label = result.stdout.trimEnd().split("  ").at(-1);
+
+      assert.strictEqual(result.status, 0);
+      assert.strictEqual(label, expected);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const [name, request, suffix] of [
+  ["trimmed thread title", { threadTitle: "  Repair worker lifecycle  " }, " | Repair worker lifecycle"],
+  ["long thread title", { threadTitle: "x".repeat(138) + "😀" + "y".repeat(20) }, " | " + "x".repeat(138) + "😀…"],
+  ["absent thread title", undefined, ""],
+  ["whitespace-only thread title", { threadTitle: " \t " }, ""]
+]) {
+  test("header renders " + name, () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+    try {
+      createFakeJob(tempDir, {
+        id: "title-header-job",
+        createdAt: "invalid-date",
+        request,
+        lines: []
+      });
+
+      const result = runCodexWatch(["--once"], tempDir);
+      const header = result.stdout.split(/\r?\n/)[0];
+
+      assert.strictEqual(result.status, 0);
+      assert.strictEqual(header, "job title-header-job | status running | phase running | elapsed unknown" + suffix);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+}
