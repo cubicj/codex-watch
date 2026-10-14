@@ -1097,6 +1097,29 @@ test("follow mode prints the header for an existing job", async () => {
   }
 });
 
+test("header elapsed stops at completedAt for a cancelled job", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
+
+  try {
+    createFakeJob(tempDir, {
+      id: "cancelled-header-job",
+      status: "cancelled",
+      createdAt: "2026-07-09T14:22:00.000Z",
+      startedAt: "2026-07-09T14:22:14.000Z",
+      completedAt: "2026-07-09T14:23:58.000Z",
+      lines: []
+    });
+
+    const result = runCodexWatch(["--once"], tempDir);
+    const header = result.stdout.split(/\r?\n/)[0];
+
+    assert.strictEqual(result.status, 0);
+    assert.strictEqual(header, "job cancelled-header-job | status cancelled | phase cancelled | elapsed 1m 44s");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("completed job banner uses startedAt and completedAt", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxw-test-"));
 

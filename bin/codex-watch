@@ -315,7 +315,9 @@ function clearTimers() {
 }
 
 function printHeader(job) {
-  const elapsed = formatElapsed(job.displayedCreatedAt);
+  const startedAt = job.startedAt || job.displayedCreatedAt;
+  const endedAt = isTerminalStatus(job.status) ? (job.completedAt || job.updatedAt) : "";
+  const elapsed = formatElapsed(startedAt, endedAt);
   const line = "job " + job.id + " | status " + job.status + " | phase " + job.phase + " | elapsed " + elapsed;
   console.log(color("dim", line));
 }
